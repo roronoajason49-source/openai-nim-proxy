@@ -15,20 +15,22 @@ const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.c
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
 // 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
-const SHOW_REASONING = false; // Set to true to show reasoning with <think> tags
+const SHOW_REASONING = true; 
 
-// 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
-const ENABLE_THINKING_MODE = false; // Set to true to enable chat_template_kwargs thinking parameter
+// 🔥 THINKING MODE TOGGLE - Enables thinking parameters directly in the root payload
+const ENABLE_THINKING_MODE = true; 
 
-// Model mapping (adjust based on available NIM models)
+// Model mapping (Includes native DeepSeek V4 Pro and GLM 5.1 mapping)
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
   'gpt-4': 'qwen/qwen3-coder-480b-a35b-instruct',
   'gpt-4-turbo': 'moonshotai/kimi-k2-instruct-0905',
-  'gpt-4o': 'deepseek-ai/deepseek-v3.1',
+  'gpt-4o': 'deepseek-ai/deepseek-v4-pro', 
   'claude-3-opus': 'openai/gpt-oss-120b',
   'claude-3-sonnet': 'openai/gpt-oss-20b',
-  'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking' 
+  'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking',
+  'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
+  'glm-5.1': 'z-ai/glm-5.1' // Direct map for JanitorAI configuration
 };
 
 // Health check endpoint
@@ -91,14 +93,43 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     }
     
+    // Configure specialized reasoning keys based on the targeted model family
+    let chatTemplateKwargs = {};
+    let topLevelParams = {};
+
+    const targetModelLower = nimModel.toLowerCase();
+    if (targetModelLower.includes('deepseek-v4')) {
+      // DeepSeek V4 utilizes specific parameter mapping rules on NIM
+      chatTemplateKwargs = { 
+        thinking: true, 
+        reasoning_effort: 'max' 
+      };
+      topLevelParams = {
+        reasoning_effort: 'max',
+        include_reasoning: true
+      };
+    } else {
+      // Setup for GLM-5.1, Qwen, and typical NIM reasoning targets
+      chatTemplateKwargs = { 
+        enable_thinking: true,
+        thinking: true // Safe-fallback parameter coverage
+      };
+      topLevelParams = {
+        include_reasoning: true
+      };
+    }
+
     // Transform OpenAI request to NIM format
     const nimRequest = {
       model: nimModel,
       messages: messages,
       temperature: temperature || 0.6,
       max_tokens: max_tokens || 9024,
-      extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
-      stream: stream || false
+      stream: stream || false,
+      ...(ENABLE_THINKING_MODE ? { 
+        chat_template_kwargs: chatTemplateKwargs,
+        ...topLevelParams
+      } : {})
     };
     
     // Make request to NVIDIA NIM API
@@ -111,7 +142,6 @@ app.post('/v1/chat/completions', async (req, res) => {
     });
     
     if (stream) {
-      // Handle streaming response with reasoning
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
@@ -181,7 +211,6 @@ app.post('/v1/chat/completions', async (req, res) => {
         res.end();
       });
     } else {
-      // Transform NIM response to OpenAI format with reasoning
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
@@ -226,7 +255,6 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
-// Catch-all for unsupported endpoints
 app.all('*', (req, res) => {
   res.status(404).json({
     error: {
@@ -239,7 +267,4 @@ app.all('*', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
-  console.log(`Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
 });
