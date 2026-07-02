@@ -14,17 +14,14 @@ app.use(express.json());
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-// 🔥 REASONING DISPLAY TOGGLE - Formats raw reasoning into <think> tags
+// 🔥 REASONING DISPLAY TOGGLE
 const SHOW_REASONING = true; 
 
-// Model mapping - Includes auto-recovery routes for deprecated models
+// Model mapping - Streamlined for DeepSeek V4 Pro
 const MODEL_MAPPING = {
-  'gpt-3.5-turbo': 'deepseek-ai/deepseek-v4-flash',
-  'gpt-4': 'deepseek-ai/deepseek-v4-pro',
+  'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
   'gpt-4o': 'deepseek-ai/deepseek-v4-pro', 
   'claude-3-opus': 'deepseek-ai/deepseek-v4-pro',
-  'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
-  'deepseek-ai/deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
   'z-ai/glm-5.1': 'deepseek-ai/deepseek-v4-pro', 
   'glm-5.1': 'deepseek-ai/deepseek-v4-pro'
 };
@@ -58,30 +55,18 @@ app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
     
-    // Exact match or fallback map check
-    let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model.toLowerCase()];
+    // Exact match or safe fallback to DeepSeek V4 Pro
+    let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model.toLowerCase()] || 'deepseek-ai/deepseek-v4-pro';
     
-    // Safe Fallback Architecture
-    if (!nimModel) {
-      const modelLower = model.toLowerCase();
-      if (modelLower.includes('deepseek') || modelLower.includes('glm') || modelLower.includes('think')) {
-        nimModel = 'deepseek-ai/deepseek-v4-pro';
-      } else {
-        nimModel = 'deepseek-ai/deepseek-v4-flash';
-      }
-    }
-    
-    // Construct the payload WITHOUT extra_body (Axios sends this directly)
+    // Construct the payload as a perfect vanilla OpenAI request (no custom keys to trigger 400 errors)
     const nimRequest = {
       model: nimModel,
       messages: messages,
-      temperature: temperature || 0.6,
-      max_tokens: max_tokens || 9024,
-      stream: stream || false,
-      chat_template_kwargs: {
-        thinking: true,
-        reasoning_effort: "high"
-      }
+      temperature: temperature ?? 0.6,
+      top_p: req.body.top_p ?? 1.0,
+      // Clamp tokens to prevent NIM schema errors (NIM hard-caps outputs)
+      max_tokens: max_tokens ? Math.min(max_tokens, 8192) : 4096,
+      stream: stream || false
     };
     
     // Request execution
@@ -107,9 +92,13 @@ app.post('/v1/chat/completions', async (req, res) => {
         buffer = lines.pop() || '';
         
         lines.forEach(line => {
+          line = line.trim();
+          if (!line) return; // Skip empty lines to prevent JSON parse crashes
+          
           if (line.startsWith('data: ')) {
             if (line.includes('[DONE]')) {
-              res.write(line + '\n');
+              // CRITICAL FIX: SSE streams MUST end in a double newline \n\n, otherwise JanitorAI hangs endlessly
+              res.write('data: [DONE]\n\n'); 
               return;
             }
             
@@ -117,7 +106,6 @@ app.post('/v1/chat/completions', async (req, res) => {
               const data = JSON.parse(line.slice(6));
               if (data.choices?.[0]?.delta) {
                 const delta = data.choices[0].delta;
-                // DeepSeek V4 streams to either reasoning_content OR reasoning depending on API version
                 const reasoning = delta.reasoning_content || delta.reasoning || '';
                 const content = delta.content || '';
                 
@@ -148,18 +136,23 @@ app.post('/v1/chat/completions', async (req, res) => {
               }
               res.write(`data: ${JSON.stringify(data)}\n\n`);
             } catch (e) {
-              res.write(line + '\n');
+              // Pass malformed lines cleanly
+              res.write(line + '\n\n');
             }
           }
         });
       });
       
-      response.data.on('end', () => res.end());
+      response.data.on('end', () => {
+        res.end();
+      });
+      
       response.data.on('error', (err) => {
         console.error('Stream processing interruption:', err);
         res.end();
       });
     } else {
+      // Non-streaming fallback
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
@@ -191,7 +184,6 @@ app.post('/v1/chat/completions', async (req, res) => {
   } catch (error) {
     console.error('Proxy connectivity error:', error.response?.data || error.message);
     
-    // Improved error logging to return exact NVIDIA rejection reasons to JanitorAI
     res.status(error.response?.status || 500).json({
       error: {
         message: error.response?.data?.detail || error.response?.data?.error?.message || error.message || 'Internal proxy error',
