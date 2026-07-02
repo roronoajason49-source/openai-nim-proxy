@@ -14,24 +14,19 @@ app.use(express.json());
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-// 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
+// 🔥 REASONING DISPLAY TOGGLE
 const SHOW_REASONING = true; 
 
-// 🔥 THINKING MODE TOGGLE - Enables standard NIM reasoning parameters
-const ENABLE_THINKING_MODE = true; 
-
-// Model mapping - Keys match exactly what JanitorAI sends
+// Model mapping - Now includes DeepSeek V4 Flash
 const MODEL_MAPPING = {
-  'gpt-3.5-turbo': 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
-  'gpt-4': 'qwen/qwen3-coder-480b-a35b-instruct',
-  'gpt-4-turbo': 'moonshotai/kimi-k2-instruct-0905',
-  'gpt-4o': 'deepseek-ai/deepseek-v4-pro', 
-  'claude-3-opus': 'openai/gpt-oss-120b',
-  'claude-3-sonnet': 'openai/gpt-oss-20b',
-  'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking',
+  'deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash',
+  'deepseek-ai/deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
-  'z-ai/glm-5.1': 'z-ai/glm-5.1', // Matches Janitor input precisely
-  'glm-5.1': 'z-ai/glm-5.1'
+  'deepseek-ai/deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
+  'gpt-4o': 'deepseek-ai/deepseek-v4-pro', 
+  'claude-3-opus': 'deepseek-ai/deepseek-v4-pro',
+  'z-ai/glm-5.1': 'deepseek-ai/deepseek-v4-pro', 
+  'glm-5.1': 'deepseek-ai/deepseek-v4-pro'
 };
 
 // Health check endpoint
@@ -39,12 +34,11 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     service: 'OpenAI to NVIDIA NIM Proxy', 
-    reasoning_display: SHOW_REASONING,
-    thinking_mode: ENABLE_THINKING_MODE
+    reasoning_display: SHOW_REASONING
   });
 });
 
-// List models endpoint (OpenAI compatible)
+// List models endpoint
 app.get('/v1/models', (req, res) => {
   const models = Object.keys(MODEL_MAPPING).map(model => ({
     id: model,
@@ -59,55 +53,26 @@ app.get('/v1/models', (req, res) => {
   });
 });
 
-// Chat completions endpoint (main proxy)
+// Chat completions endpoint
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
     
-    // Smart model selection with fallback
-    let nimModel = MODEL_MAPPING[model];
-    if (!nimModel) {
-      try {
-        await axios.post(`${NIM_API_BASE}/chat/completions`, {
-          model: model,
-          messages: [{ role: 'user', content: 'test' }],
-          max_tokens: 1
-        }, {
-          headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
-          validateStatus: (status) => status < 500
-        }).then(res => {
-          if (res.status >= 200 && res.status < 300) {
-            nimModel = model;
-          }
-        });
-      } catch (e) {}
-      
-      if (!nimModel) {
-        const modelLower = model.toLowerCase();
-        if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
-          nimModel = 'meta/llama-3.1-405b-instruct';
-        } else if (modelLower.includes('claude') || modelLower.includes('gemini') || modelLower.includes('70b')) {
-          nimModel = 'meta/llama-3.1-70b-instruct';
-        } else {
-          nimModel = 'meta/llama-3.1-8b-instruct';
-        }
-      }
-    }
+    // Exact match or safe fallback to DeepSeek V4 Pro
+    let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'deepseek-ai/deepseek-v4-pro';
     
-    // Transform OpenAI request to strict NVIDIA NIM schema format
+    // Construct the payload as a perfect vanilla OpenAI request (no custom keys to trigger 400 errors)
     const nimRequest = {
       model: nimModel,
       messages: messages,
-      temperature: temperature || 0.6,
-      max_tokens: max_tokens || 9024,
-      stream: stream || false,
-      ...(ENABLE_THINKING_MODE ? { 
-        chat_template_kwargs: { enable_thinking: true },
-        include_reasoning: true
-      } : {})
+      temperature: temperature ?? 0.6,
+      top_p: req.body.top_p ?? 1.0,
+      // Clamp tokens to prevent NIM schema errors (NIM hard-caps outputs)
+      max_tokens: max_tokens ? Math.min(max_tokens, 8192) : 4096,
+      stream: stream || false
     };
     
-    // Make request to NVIDIA NIM API
+    // Request execution
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
@@ -130,17 +95,22 @@ app.post('/v1/chat/completions', async (req, res) => {
         buffer = lines.pop() || '';
         
         lines.forEach(line => {
+          line = line.trim();
+          if (!line) return; // Skip empty lines to prevent JSON parse crashes
+          
           if (line.startsWith('data: ')) {
             if (line.includes('[DONE]')) {
-              res.write(line + '\n');
+              // CRITICAL FIX: SSE streams MUST end in a double newline \n\n, otherwise JanitorAI hangs endlessly
+              res.write('data: [DONE]\n\n'); 
               return;
             }
             
             try {
               const data = JSON.parse(line.slice(6));
               if (data.choices?.[0]?.delta) {
-                const reasoning = data.choices[0].delta.reasoning_content;
-                const content = data.choices[0].delta.content;
+                const delta = data.choices[0].delta;
+                const reasoning = delta.reasoning_content || delta.reasoning || '';
+                const content = delta.content || '';
                 
                 if (SHOW_REASONING) {
                   let combinedContent = '';
@@ -153,39 +123,39 @@ app.post('/v1/chat/completions', async (req, res) => {
                   }
                   
                   if (content && reasoningStarted) {
-                    combinedContent += '</think>\n\n' + content;
+                    combinedContent += '\n</think>\n\n' + content;
                     reasoningStarted = false;
                   } else if (content) {
                     combinedContent += content;
                   }
                   
-                  if (combinedContent) {
-                    data.choices[0].delta.content = combinedContent;
-                    delete data.choices[0].delta.reasoning_content;
-                  }
+                  data.choices[0].delta.content = combinedContent || content;
                 } else {
-                  if (content) {
-                    data.choices[0].delta.content = content;
-                  } else {
-                    data.choices[0].delta.content = '';
-                  }
-                  delete data.choices[0].delta.reasoning_content;
+                  data.choices[0].delta.content = content;
                 }
+                
+                delete data.choices[0].delta.reasoning_content;
+                delete data.choices[0].delta.reasoning;
               }
               res.write(`data: ${JSON.stringify(data)}\n\n`);
             } catch (e) {
-              res.write(line + '\n');
+              // Pass malformed lines cleanly
+              res.write(line + '\n\n');
             }
           }
         });
       });
       
-      response.data.on('end', () => res.end());
+      response.data.on('end', () => {
+        res.end();
+      });
+      
       response.data.on('error', (err) => {
-        console.error('Stream error:', err);
+        console.error('Stream processing interruption:', err);
         res.end();
       });
     } else {
+      // Non-streaming fallback
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
@@ -193,9 +163,10 @@ app.post('/v1/chat/completions', async (req, res) => {
         model: model,
         choices: response.data.choices.map(choice => {
           let fullContent = choice.message?.content || '';
+          const reasoning = choice.message?.reasoning_content || choice.message?.reasoning;
           
-          if (SHOW_REASONING && choice.message?.reasoning_content) {
-            fullContent = '<think>\n' + choice.message.reasoning_content + '\n</think>\n\n' + fullContent;
+          if (SHOW_REASONING && reasoning) {
+            fullContent = '<think>\n' + reasoning + '\n</think>\n\n' + fullContent;
           }
           
           return {
@@ -207,23 +178,19 @@ app.post('/v1/chat/completions', async (req, res) => {
             finish_reason: choice.finish_reason
           };
         }),
-        usage: response.data.usage || {
-          prompt_tokens: 0,
-          completion_tokens: 0,
-          total_tokens: 0
-        }
+        usage: response.data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
       };
       
       res.json(openaiResponse);
     }
     
   } catch (error) {
-    console.error('Proxy error:', error.message);
+    console.error('Proxy connectivity error:', error.response?.data || error.message);
     
     res.status(error.response?.status || 500).json({
       error: {
-        message: error.message || 'Internal server error',
-        type: 'invalid_request_error',
+        message: error.response?.data?.detail || error.response?.data?.error?.message || error.message || 'Internal proxy error',
+        type: 'proxy_error',
         code: error.response?.status || 500
       }
     });
@@ -231,13 +198,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 });
 
 app.all('*', (req, res) => {
-  res.status(404).json({
-    error: {
-      message: `Endpoint ${req.path} not found`,
-      type: 'invalid_request_error',
-      code: 404
-    }
-  });
+  res.status(404).json({ error: { message: `Endpoint ${req.path} not found`, type: 'invalid_request_error', code: 404 } });
 });
 
 app.listen(PORT, () => {
