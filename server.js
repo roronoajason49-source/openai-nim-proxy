@@ -25,7 +25,6 @@ const MODEL_MAPPING = {
   'claude-3-opus': 'deepseek-ai/deepseek-v4-pro',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
   'deepseek-ai/deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
-  // Auto-redirects: If Janitor sends the dead GLM model, seamlessly upgrade it to DeepSeek V4 Pro
   'z-ai/glm-5.1': 'deepseek-ai/deepseek-v4-pro', 
   'glm-5.1': 'deepseek-ai/deepseek-v4-pro'
 };
@@ -62,7 +61,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     // Exact match or fallback map check
     let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model.toLowerCase()];
     
-    // Safe Fallback Architecture - Eliminates 410 loops from old Llama 3.1 fallbacks
+    // Safe Fallback Architecture
     if (!nimModel) {
       const modelLower = model.toLowerCase();
       if (modelLower.includes('deepseek') || modelLower.includes('glm') || modelLower.includes('think')) {
@@ -72,18 +71,16 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     }
     
-    // Construct the payload utilizing native NVIDIA extra_body formatting rules
+    // Construct the payload WITHOUT extra_body (Axios sends this directly)
     const nimRequest = {
       model: nimModel,
       messages: messages,
       temperature: temperature || 0.6,
       max_tokens: max_tokens || 9024,
       stream: stream || false,
-      extra_body: {
-        chat_template_kwargs: {
-          thinking: true,
-          enable_thinking: true
-        }
+      chat_template_kwargs: {
+        thinking: true,
+        reasoning_effort: "high"
       }
     };
     
@@ -120,6 +117,7 @@ app.post('/v1/chat/completions', async (req, res) => {
               const data = JSON.parse(line.slice(6));
               if (data.choices?.[0]?.delta) {
                 const delta = data.choices[0].delta;
+                // DeepSeek V4 streams to either reasoning_content OR reasoning depending on API version
                 const reasoning = delta.reasoning_content || delta.reasoning || '';
                 const content = delta.content || '';
                 
@@ -191,12 +189,12 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
     
   } catch (error) {
-    console.error('Proxy connectivity error:', error.message);
+    console.error('Proxy connectivity error:', error.response?.data || error.message);
     
-    // Prevent hanging responses by ensuring a valid error payload returns
+    // Improved error logging to return exact NVIDIA rejection reasons to JanitorAI
     res.status(error.response?.status || 500).json({
       error: {
-        message: error.response?.data?.error?.message || error.message || 'Internal proxy error',
+        message: error.response?.data?.detail || error.response?.data?.error?.message || error.message || 'Internal proxy error',
         type: 'proxy_error',
         code: error.response?.status || 500
       }
