@@ -14,10 +14,10 @@ app.use(express.json());
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-// 🔥 REASONING DISPLAY TOGGLE - Formats separate reasoning fields into <think> blocks
+// 🔥 REASONING DISPLAY TOGGLE - Formats internal reasoning tracks into <think> blocks
 const SHOW_REASONING = true; 
 
-// Model mapping - Fully updated with active model IDs (GLM removed)
+// Model mapping dictionary (GLM removed completely)
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'meta/llama-3.3-70b-instruct',
   'gpt-4': 'nvidia/llama-3.3-nemotron-super-49b-v1',
@@ -58,27 +58,16 @@ app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
     
-    // Smart model selection
+    // ⚡ INSTANT LOCAL MODEL SELECTION (No lagging network calls)
     let nimModel = MODEL_MAPPING[model];
+    
     if (!nimModel) {
-      try {
-        await axios.post(`${NIM_API_BASE}/chat/completions`, {
-          model: model,
-          messages: [{ role: 'user', content: 'test' }],
-          max_tokens: 1
-        }, {
-          headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
-          validateStatus: (status) => status < 500
-        }).then(res => {
-          if (res.status >= 200 && res.status < 300) {
-            nimModel = model;
-          }
-        });
-      } catch (e) {}
-      
-      // Modernized Fallbacks to prevent 410 Gone errors
-      if (!nimModel) {
-        const modelLower = model.toLowerCase();
+      if (model && model.includes('/')) {
+        // If Janitor passes a raw structural ID like 'deepseek-ai/deepseek-v4-pro' directly
+        nimModel = model;
+      } else {
+        // Instant local keyword fallback
+        const modelLower = (model || '').toLowerCase();
         if (modelLower.includes('deepseek') || modelLower.includes('v4') || modelLower.includes('opus')) {
           nimModel = 'deepseek-ai/deepseek-v4-pro';
         } else if (modelLower.includes('nemotron') || modelLower.includes('49b')) {
@@ -89,22 +78,23 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     }
     
-    // Clean standard request payload
+    // Balanced request payload configurations
     const nimRequest = {
       model: nimModel,
       messages: messages,
-      temperature: temperature || 0.6,
+      temperature: temperature !== undefined ? temperature : 0.6,
       max_tokens: max_tokens || 4096,
       stream: stream || false
     };
     
-    // Request to NVIDIA NIM
+    // Request to NVIDIA NIM with an added 60-second safety timeout
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      responseType: stream ? 'stream' : 'json'
+      responseType: stream ? 'stream' : 'json',
+      timeout: 60000 
     });
     
     if (stream) {
@@ -173,7 +163,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       
       response.data.on('end', () => res.end());
       response.data.on('error', (err) => {
-        console.error('Stream error:', err);
+        console.error('Stream processing error:', err);
         res.end();
       });
     } else {
@@ -209,7 +199,6 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
     
   } catch (error) {
-    // Enhanced console logs to read exact API rejections inside Render dashboard
     console.error('Proxy error details:', error.response?.data || error.message);
     
     res.status(error.response?.status || 500).json({
