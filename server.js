@@ -17,7 +17,7 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 // 🔥 REASONING DISPLAY TOGGLE - Formats internal reasoning tracks into <think> blocks
 const SHOW_REASONING = true; 
 
-// Model mapping dictionary (GLM removed completely)
+// Model mapping dictionary (GLM removed)
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'meta/llama-3.3-70b-instruct',
   'gpt-4': 'nvidia/llama-3.3-nemotron-super-49b-v1',
@@ -58,15 +58,13 @@ app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
     
-    // ⚡ INSTANT LOCAL MODEL SELECTION (No lagging network calls)
+    // ⚡ INSTANT LOCAL MODEL SELECTION
     let nimModel = MODEL_MAPPING[model];
     
     if (!nimModel) {
       if (model && model.includes('/')) {
-        // If Janitor passes a raw structural ID like 'deepseek-ai/deepseek-v4-pro' directly
         nimModel = model;
       } else {
-        // Instant local keyword fallback
         const modelLower = (model || '').toLowerCase();
         if (modelLower.includes('deepseek') || modelLower.includes('v4') || modelLower.includes('opus')) {
           nimModel = 'deepseek-ai/deepseek-v4-pro';
@@ -78,16 +76,20 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     }
     
-    // Balanced request payload configurations
+    // Request payload configuration
     const nimRequest = {
       model: nimModel,
       messages: messages,
       temperature: temperature !== undefined ? temperature : 0.6,
-      max_tokens: max_tokens || 4096,
+      max_tokens: max_tokens || 8192, // Bumped up for long reasoning chains
       stream: stream || false
     };
+
+    // 🧠 TRIGGER NIM REASONING: NVIDIA requires this top-level flag to activate DeepSeek
+    if (nimModel.includes('deepseek') || nimModel.includes('nemotron-3') || nimModel.includes('thinking')) {
+      nimRequest.reasoning_effort = "high";
+    }
     
-    // Request to NVIDIA NIM with an added 60-second safety timeout
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
@@ -111,17 +113,27 @@ app.post('/v1/chat/completions', async (req, res) => {
         buffer = lines.pop() || '';
         
         lines.forEach(line => {
-          if (line.startsWith('data: ')) {
-            if (line.includes('[DONE]')) {
-              res.write(line + '\n');
-              return;
-            }
-            
+          const trimmedLine = line.trim();
+          if (!trimmedLine) return; 
+          
+          // FIX 1: Proper double newline requirement for SSE termination (Stops Janitor from hanging)
+          if (trimmedLine === 'data: [DONE]') {
+            res.write('data: [DONE]\n\n');
+            return;
+          }
+          
+          if (trimmedLine.startsWith('data:')) {
             try {
-              const data = JSON.parse(line.slice(6));
+              // FIX 2: Safe JSON stripping
+              const jsonStr = trimmedLine.replace(/^data:\s*/, '');
+              const data = JSON.parse(jsonStr);
+              
               if (data.choices?.[0]?.delta) {
-                const reasoning = data.choices[0].delta.reasoning_content;
-                const content = data.choices[0].delta.content;
+                const delta = data.choices[0].delta;
+                
+                // FIX 3: Catch NVIDIA NIM's distinct `.reasoning` key for DeepSeek
+                const reasoning = delta.reasoning_content || delta.reasoning || '';
+                const content = delta.content || '';
                 
                 if (SHOW_REASONING) {
                   let combinedContent = '';
@@ -134,28 +146,31 @@ app.post('/v1/chat/completions', async (req, res) => {
                   }
                   
                   if (content && reasoningStarted) {
-                    combinedContent += '</think>\n\n' + content;
+                    combinedContent += '\n</think>\n\n' + content;
                     reasoningStarted = false;
                   } else if (content) {
                     combinedContent += content;
                   }
                   
-                  if (combinedContent) {
-                    data.choices[0].delta.content = combinedContent;
-                    delete data.choices[0].delta.reasoning_content;
+                  // FIX 4: Auto-close tag if reasoning finishes or ends natively
+                  if (data.choices[0].finish_reason && reasoningStarted) {
+                     combinedContent += '\n</think>\n\n';
+                     reasoningStarted = false;
                   }
-                } else {
-                  if (content) {
-                    data.choices[0].delta.content = content;
-                  } else {
-                    data.choices[0].delta.content = '';
-                  }
+                  
+                  data.choices[0].delta.content = combinedContent;
                   delete data.choices[0].delta.reasoning_content;
+                  delete data.choices[0].delta.reasoning;
+                } else {
+                  data.choices[0].delta.content = content;
+                  delete data.choices[0].delta.reasoning_content;
+                  delete data.choices[0].delta.reasoning;
                 }
               }
+              // Double newline forces Janitor to read the chunk immediately
               res.write(`data: ${JSON.stringify(data)}\n\n`);
             } catch (e) {
-              res.write(line + '\n');
+              res.write(`${trimmedLine}\n\n`);
             }
           }
         });
@@ -174,9 +189,10 @@ app.post('/v1/chat/completions', async (req, res) => {
         model: model,
         choices: response.data.choices.map(choice => {
           let fullContent = choice.message?.content || '';
+          const reasoning = choice.message?.reasoning_content || choice.message?.reasoning || '';
           
-          if (SHOW_REASONING && choice.message?.reasoning_content) {
-            fullContent = '<think>\n' + choice.message.reasoning_content + '\n</think>\n\n' + fullContent;
+          if (SHOW_REASONING && reasoning) {
+            fullContent = '<think>\n' + reasoning + '\n</think>\n\n' + fullContent;
           }
           
           return {
