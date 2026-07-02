@@ -14,11 +14,11 @@ app.use(express.json());
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-// 🔥 REASONING DISPLAY TOGGLE - Keep true to catch and format native thoughts into <think> blocks
+// 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
 const SHOW_REASONING = true; 
 
-// 🔥 THINKING MODE TOGGLE - Kept false to block deprecated payload formats from triggering 410 errors
-const ENABLE_THINKING_MODE = false; 
+// 🔥 THINKING MODE TOGGLE - Enables standard NIM reasoning parameters
+const ENABLE_THINKING_MODE = true; 
 
 // Model mapping - Keys match exactly what JanitorAI sends
 const MODEL_MAPPING = {
@@ -30,7 +30,7 @@ const MODEL_MAPPING = {
   'claude-3-sonnet': 'openai/gpt-oss-20b',
   'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
-  'z-ai/glm-5.1': 'z-ai/glm-5.1', 
+  'z-ai/glm-5.1': 'z-ai/glm-5.1', // Matches Janitor input precisely
   'glm-5.1': 'z-ai/glm-5.1'
 };
 
@@ -94,7 +94,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     }
     
-    // Transform OpenAI request to clean standard API format
+    // Transform OpenAI request to strict NVIDIA NIM schema format
     const nimRequest = {
       model: nimModel,
       messages: messages,
