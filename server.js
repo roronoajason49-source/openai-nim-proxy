@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
-// 💥 THE FIX: Increase Express's default 100kb limit to 50mb to handle JanitorAI's massive chat histories
+// 💥 50MB limit to handle JanitorAI's massive chat histories
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
@@ -60,18 +60,22 @@ app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
     
-    // Exact match or safe fallback to DeepSeek V4 Pro
+    // Exact match or safe fallback
     let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'deepseek-ai/deepseek-v4-pro';
     
-    // Construct the payload as a perfect vanilla OpenAI request (no custom keys to trigger 400 errors)
+    // Construct the payload with the REQUIRED thinking triggers
     const nimRequest = {
       model: nimModel,
       messages: messages,
       temperature: temperature ?? 0.6,
       top_p: req.body.top_p ?? 1.0,
-      // Clamp tokens to prevent NIM schema errors (NIM hard-caps outputs)
       max_tokens: max_tokens ? Math.min(max_tokens, 8192) : 4096,
-      stream: stream || false
+      stream: stream || false,
+      // 💥 THE FIX: This is strictly required by NVIDIA NIM to activate DeepSeek reasoning
+      chat_template_kwargs: {
+        enable_thinking: true,
+        thinking: true
+      }
     };
     
     // Request execution
@@ -155,7 +159,6 @@ app.post('/v1/chat/completions', async (req, res) => {
         res.end();
       });
     } else {
-      // Non-streaming fallback
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
