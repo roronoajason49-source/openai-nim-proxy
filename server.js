@@ -14,19 +14,24 @@ app.use(express.json());
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-// 🔥 REASONING DISPLAY TOGGLE - Formats internal reasoning tracks into <think> blocks
+// 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
 const SHOW_REASONING = true; 
 
-// Model mapping dictionary (GLM removed)
+// 🔥 THINKING MODE TOGGLE - Enables standard NIM reasoning parameters
+const ENABLE_THINKING_MODE = true; 
+
+// Model mapping - Keys match exactly what JanitorAI sends
 const MODEL_MAPPING = {
-  'gpt-3.5-turbo': 'meta/llama-3.3-70b-instruct',
-  'gpt-4': 'nvidia/llama-3.3-nemotron-super-49b-v1',
-  'gpt-4-turbo': 'nvidia/llama-3.3-nemotron-super-49b-v1',
+  'gpt-3.5-turbo': 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
+  'gpt-4': 'qwen/qwen3-coder-480b-a35b-instruct',
+  'gpt-4-turbo': 'moonshotai/kimi-k2-instruct-0905',
   'gpt-4o': 'deepseek-ai/deepseek-v4-pro', 
-  'claude-3-opus': 'deepseek-ai/deepseek-v4-pro',
-  'claude-3-sonnet': 'nvidia/llama-3.3-nemotron-super-49b-v1',
-  'gemini-pro': 'nvidia/llama-3.3-nemotron-super-49b-v1',
-  'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro'
+  'claude-3-opus': 'openai/gpt-oss-120b',
+  'claude-3-sonnet': 'openai/gpt-oss-20b',
+  'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking',
+  'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
+  'z-ai/glm-5.1': 'z-ai/glm-5.1', // Matches Janitor input precisely
+  'glm-5.1': 'z-ai/glm-5.1'
 };
 
 // Health check endpoint
@@ -34,11 +39,12 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     service: 'OpenAI to NVIDIA NIM Proxy', 
-    reasoning_display: SHOW_REASONING
+    reasoning_display: SHOW_REASONING,
+    thinking_mode: ENABLE_THINKING_MODE
   });
 });
 
-// List models endpoint
+// List models endpoint (OpenAI compatible)
 app.get('/v1/models', (req, res) => {
   const models = Object.keys(MODEL_MAPPING).map(model => ({
     id: model,
@@ -53,50 +59,61 @@ app.get('/v1/models', (req, res) => {
   });
 });
 
-// Chat completions endpoint
+// Chat completions endpoint (main proxy)
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
     
-    // ⚡ INSTANT LOCAL MODEL SELECTION
+    // Smart model selection with fallback
     let nimModel = MODEL_MAPPING[model];
-    
     if (!nimModel) {
-      if (model && model.includes('/')) {
-        nimModel = model;
-      } else {
-        const modelLower = (model || '').toLowerCase();
-        if (modelLower.includes('deepseek') || modelLower.includes('v4') || modelLower.includes('opus')) {
-          nimModel = 'deepseek-ai/deepseek-v4-pro';
-        } else if (modelLower.includes('nemotron') || modelLower.includes('49b')) {
-          nimModel = 'nvidia/llama-3.3-nemotron-super-49b-v1';
+      try {
+        await axios.post(`${NIM_API_BASE}/chat/completions`, {
+          model: model,
+          messages: [{ role: 'user', content: 'test' }],
+          max_tokens: 1
+        }, {
+          headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
+          validateStatus: (status) => status < 500
+        }).then(res => {
+          if (res.status >= 200 && res.status < 300) {
+            nimModel = model;
+          }
+        });
+      } catch (e) {}
+      
+      if (!nimModel) {
+        const modelLower = model.toLowerCase();
+        if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
+          nimModel = 'meta/llama-3.1-405b-instruct';
+        } else if (modelLower.includes('claude') || modelLower.includes('gemini') || modelLower.includes('70b')) {
+          nimModel = 'meta/llama-3.1-70b-instruct';
         } else {
-          nimModel = 'meta/llama-3.3-70b-instruct';
+          nimModel = 'meta/llama-3.1-8b-instruct';
         }
       }
     }
     
-    // Request payload configuration
+    // Transform OpenAI request to strict NVIDIA NIM schema format
     const nimRequest = {
       model: nimModel,
       messages: messages,
-      temperature: temperature !== undefined ? temperature : 0.6,
-      max_tokens: max_tokens || 8192, // Bumped up for long reasoning chains
-      stream: stream || false
+      temperature: temperature || 0.6,
+      max_tokens: max_tokens || 9024,
+      stream: stream || false,
+      ...(ENABLE_THINKING_MODE ? { 
+        chat_template_kwargs: { enable_thinking: true },
+        include_reasoning: true
+      } : {})
     };
-
-    // 🧠 TRIGGER NIM REASONING: NVIDIA requires this top-level flag to activate DeepSeek
-    if (nimModel.includes('deepseek') || nimModel.includes('nemotron-3') || nimModel.includes('thinking')) {
-      nimRequest.reasoning_effort = "high";
-    }
     
+    // Make request to NVIDIA NIM API
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      responseType: stream ? 'stream' : 'json',
-      timeout: 60000 
+      responseType: stream ? 'stream' : 'json'
     });
     
     if (stream) {
@@ -113,27 +130,17 @@ app.post('/v1/chat/completions', async (req, res) => {
         buffer = lines.pop() || '';
         
         lines.forEach(line => {
-          const trimmedLine = line.trim();
-          if (!trimmedLine) return; 
-          
-          // FIX 1: Proper double newline requirement for SSE termination (Stops Janitor from hanging)
-          if (trimmedLine === 'data: [DONE]') {
-            res.write('data: [DONE]\n\n');
-            return;
-          }
-          
-          if (trimmedLine.startsWith('data:')) {
+          if (line.startsWith('data: ')) {
+            if (line.includes('[DONE]')) {
+              res.write(line + '\n');
+              return;
+            }
+            
             try {
-              // FIX 2: Safe JSON stripping
-              const jsonStr = trimmedLine.replace(/^data:\s*/, '');
-              const data = JSON.parse(jsonStr);
-              
+              const data = JSON.parse(line.slice(6));
               if (data.choices?.[0]?.delta) {
-                const delta = data.choices[0].delta;
-                
-                // FIX 3: Catch NVIDIA NIM's distinct `.reasoning` key for DeepSeek
-                const reasoning = delta.reasoning_content || delta.reasoning || '';
-                const content = delta.content || '';
+                const reasoning = data.choices[0].delta.reasoning_content;
+                const content = data.choices[0].delta.content;
                 
                 if (SHOW_REASONING) {
                   let combinedContent = '';
@@ -146,31 +153,28 @@ app.post('/v1/chat/completions', async (req, res) => {
                   }
                   
                   if (content && reasoningStarted) {
-                    combinedContent += '\n</think>\n\n' + content;
+                    combinedContent += '</think>\n\n' + content;
                     reasoningStarted = false;
                   } else if (content) {
                     combinedContent += content;
                   }
                   
-                  // FIX 4: Auto-close tag if reasoning finishes or ends natively
-                  if (data.choices[0].finish_reason && reasoningStarted) {
-                     combinedContent += '\n</think>\n\n';
-                     reasoningStarted = false;
+                  if (combinedContent) {
+                    data.choices[0].delta.content = combinedContent;
+                    delete data.choices[0].delta.reasoning_content;
                   }
-                  
-                  data.choices[0].delta.content = combinedContent;
-                  delete data.choices[0].delta.reasoning_content;
-                  delete data.choices[0].delta.reasoning;
                 } else {
-                  data.choices[0].delta.content = content;
+                  if (content) {
+                    data.choices[0].delta.content = content;
+                  } else {
+                    data.choices[0].delta.content = '';
+                  }
                   delete data.choices[0].delta.reasoning_content;
-                  delete data.choices[0].delta.reasoning;
                 }
               }
-              // Double newline forces Janitor to read the chunk immediately
               res.write(`data: ${JSON.stringify(data)}\n\n`);
             } catch (e) {
-              res.write(`${trimmedLine}\n\n`);
+              res.write(line + '\n');
             }
           }
         });
@@ -178,7 +182,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       
       response.data.on('end', () => res.end());
       response.data.on('error', (err) => {
-        console.error('Stream processing error:', err);
+        console.error('Stream error:', err);
         res.end();
       });
     } else {
@@ -189,10 +193,9 @@ app.post('/v1/chat/completions', async (req, res) => {
         model: model,
         choices: response.data.choices.map(choice => {
           let fullContent = choice.message?.content || '';
-          const reasoning = choice.message?.reasoning_content || choice.message?.reasoning || '';
           
-          if (SHOW_REASONING && reasoning) {
-            fullContent = '<think>\n' + reasoning + '\n</think>\n\n' + fullContent;
+          if (SHOW_REASONING && choice.message?.reasoning_content) {
+            fullContent = '<think>\n' + choice.message.reasoning_content + '\n</think>\n\n' + fullContent;
           }
           
           return {
@@ -215,7 +218,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
     
   } catch (error) {
-    console.error('Proxy error details:', error.response?.data || error.message);
+    console.error('Proxy error:', error.message);
     
     res.status(error.response?.status || 500).json({
       error: {
