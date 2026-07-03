@@ -19,16 +19,16 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 // 🔥 REASONING DISPLAY TOGGLE
 const SHOW_REASONING = true; 
 
-// Model mapping
+// Model mapping - Added GLM 5.2 Native Routing
 const MODEL_MAPPING = {
+  'glm-5.2': 'z-ai/glm-5.2',
+  'z-ai/glm-5.2': 'z-ai/glm-5.2',
+  'step-3.7-flash': 'stepfun-ai/step-3.7-flash', 
+  'qwen-122b': 'qwen/qwen3.5-122b-a10b',         
   'deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash',
-  'deepseek-ai/deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
-  'deepseek-ai/deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
-  'gpt-4o': 'deepseek-ai/deepseek-v4-pro', 
-  'claude-3-opus': 'deepseek-ai/deepseek-v4-pro',
-  'z-ai/glm-5.1': 'deepseek-ai/deepseek-v4-pro', 
-  'glm-5.1': 'deepseek-ai/deepseek-v4-pro'
+  'z-ai/glm-5.1': 'stepfun-ai/step-3.7-flash', 
+  'glm-5.1': 'stepfun-ai/step-3.7-flash'
 };
 
 // Health check endpoint
@@ -60,8 +60,8 @@ app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
     
-    // Exact match or safe fallback
-    let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'deepseek-ai/deepseek-v4-pro';
+    // Exact match or safe fallback to the new GLM-5.2 model
+    let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'z-ai/glm-5.2';
     
     // Construct the payload with the REQUIRED thinking triggers
     const nimRequest = {
@@ -71,7 +71,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       top_p: req.body.top_p ?? 1.0,
       max_tokens: max_tokens ? Math.min(max_tokens, 8192) : 4096,
       stream: stream || false,
-      // 💥 THE FIX: This is strictly required by NVIDIA NIM to activate DeepSeek reasoning
       chat_template_kwargs: {
         enable_thinking: true,
         thinking: true
