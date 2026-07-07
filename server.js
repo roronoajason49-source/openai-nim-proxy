@@ -17,12 +17,15 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 
 const SHOW_REASONING = true; 
 
-// Model mapping - Fully supports both Step 3.7 Flash and GLM 5.2
+// Model mapping - Added MiniMax M3 and M2.7 Support alongside Step 3.7 & GLM 5.2
 const MODEL_MAPPING = {
   'step-3.7-flash': 'stepfun-ai/step-3.7-flash',
-  'stepfun-ai/step-3.7-flash': 'stepfun-ai/step-3.7-flash', // Full direct match key
+  'stepfun-ai/step-3.7-flash': 'stepfun-ai/step-3.7-flash', 
   'glm-5.2': 'z-ai/glm-5.2',
   'z-ai/glm-5.2': 'z-ai/glm-5.2',
+  'minimax-m3': 'minimaxai/minimax-m3',
+  'minimaxai/minimax-m3': 'minimaxai/minimax-m3',
+  'minimax-m2.7': 'minimaxai/minimax-m2.7',
   'qwen-122b': 'qwen/qwen3.5-122b-a10b',         
   'deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
@@ -82,7 +85,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: stream || false
     };
     
-    // Apply internal parameter setups specifically for DeepSeek if targeted
+    // DeepSeek family reasoning parameters
     if (nimModel.includes('deepseek-v4')) {
       nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
     }
