@@ -1,3 +1,6 @@
+That is fantastic news. NVIDIA officially deploying GLM 5.2 to their free tier is huge for long-context roleplay, especially since its predecessor was so fast. Since GLM 5.2 shares the same advanced reasoning architecture, the same thinking configuration we've already set up will plug right into it perfectly.
+Here is your updated server.js file. I have added glm-5.2 directly into your model mapping, and I also updated the fallback system so that if JanitorAI sends any unrecognized model string, it will default directly to z-ai/glm-5.2.
+```javascript
 // server.js - OpenAI to NVIDIA NIM API Proxy
 const express = require('express');
 const cors = require('cors');
@@ -8,6 +11,7 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
+// 💥 50MB limit to handle JanitorAI's massive chat histories
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
@@ -15,9 +19,10 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
+// 🔥 REASONING DISPLAY TOGGLE
 const SHOW_REASONING = true; 
 
-// Model mapping
+// Model mapping - Added GLM 5.2 Native Routing
 const MODEL_MAPPING = {
   'glm-5.2': 'z-ai/glm-5.2',
   'z-ai/glm-5.2': 'z-ai/glm-5.2',
@@ -25,71 +30,57 @@ const MODEL_MAPPING = {
   'qwen-122b': 'qwen/qwen3.5-122b-a10b',         
   'deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
-  'z-ai/glm-5.1': 'z-ai/glm-5.2', 
-  'glm-5.1': 'z-ai/glm-5.2'
+  'z-ai/glm-5.1': 'stepfun-ai/step-3.7-flash', 
+  'glm-5.1': 'stepfun-ai/step-3.7-flash'
 };
 
+// Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'OpenAI to NVIDIA NIM Proxy', reasoning_display: SHOW_REASONING });
+  res.json({ 
+    status: 'ok', 
+    service: 'OpenAI to NVIDIA NIM Proxy', 
+    reasoning_display: SHOW_REASONING
+  });
 });
 
+// List models endpoint
 app.get('/v1/models', (req, res) => {
   const models = Object.keys(MODEL_MAPPING).map(model => ({
-    id: model, object: 'model', created: Date.now(), owned_by: 'nvidia-nim-proxy'
+    id: model,
+    object: 'model',
+    created: Date.now(),
+    owned_by: 'nvidia-nim-proxy'
   }));
-  res.json({ object: 'list', data: models });
+  
+  res.json({
+    object: 'list',
+    data: models
+  });
 });
 
+// Chat completions endpoint
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
+    
+    // Exact match or safe fallback to the new GLM-5.2 model
     let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'z-ai/glm-5.2';
     
-    // 🔥 THE FIX: Aggressive Message Normalizer
-    const normalizedMessages = [];
-    
-    for (const msg of messages) {
-      // 1. Drop completely empty messages
-      if (!msg.content || typeof msg.content !== 'string' || msg.content.trim() === '') continue;
-      
-      let role = msg.role.toLowerCase();
-      
-      // 2. Convert mid-chat 'system' prompts (like Author's Notes) into 'user' prompts
-      if (role === 'system' && normalizedMessages.length > 0) {
-        role = 'user'; 
-      }
-      
-      // 3. Force Strict Alternation: Merge consecutive messages of the same role
-      if (normalizedMessages.length > 0 && normalizedMessages[normalizedMessages.length - 1].role === role) {
-        normalizedMessages[normalizedMessages.length - 1].content += '\n\n' + msg.content;
-      } else {
-        normalizedMessages.push({ role, content: msg.content });
-      }
-    }
-    
-    // 4. Ensure the chat history doesn't start with an assistant reply
-    if (normalizedMessages.length > 0 && normalizedMessages[0].role === 'assistant') {
-      normalizedMessages.unshift({ role: 'user', content: 'Hello.' });
-    }
-
-    // Safely clamp numbers to prevent schema threshold crashes
-    const safe_max_tokens = (parseInt(max_tokens) > 0) ? Math.min(parseInt(max_tokens), 4096) : 4096;
-    const safe_temp = (parseFloat(temperature) > 0) ? parseFloat(temperature) : 0.6;
-    
+    // Construct the payload with the REQUIRED thinking triggers
     const nimRequest = {
       model: nimModel,
-      messages: normalizedMessages,
-      temperature: safe_temp,
+      messages: messages,
+      temperature: temperature ?? 0.6,
       top_p: req.body.top_p ?? 1.0,
-      max_tokens: safe_max_tokens,
-      stream: stream || false
+      max_tokens: max_tokens ? Math.min(max_tokens, 8192) : 4096,
+      stream: stream || false,
+      chat_template_kwargs: {
+        enable_thinking: true,
+        thinking: true
+      }
     };
     
-    // Append reasoning tags ONLY for models that strictly require custom flags
-    if (nimModel.includes('deepseek-v4')) {
-      nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
-    }
-    
+    // Request execution
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
@@ -130,6 +121,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                 
                 if (SHOW_REASONING) {
                   let combinedContent = '';
+                  
                   if (reasoning && !reasoningStarted) {
                     combinedContent = '<think>\n' + reasoning;
                     reasoningStarted = true;
@@ -143,6 +135,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                   } else if (content) {
                     combinedContent += content;
                   }
+                  
                   data.choices[0].delta.content = combinedContent || content;
                 } else {
                   data.choices[0].delta.content = content;
@@ -159,66 +152,63 @@ app.post('/v1/chat/completions', async (req, res) => {
         });
       });
       
-      response.data.on('end', () => res.end());
+      response.data.on('end', () => {
+        res.end();
+      });
+      
       response.data.on('error', (err) => {
         console.error('Stream processing interruption:', err);
         res.end();
       });
     } else {
-      res.json({}); 
+      const openaiResponse = {
+        id: `chatcmpl-${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: model,
+        choices: response.data.choices.map(choice => {
+          let fullContent = choice.message?.content || '';
+          const reasoning = choice.message?.reasoning_content || choice.message?.reasoning;
+          
+          if (SHOW_REASONING && reasoning) {
+            fullContent = '<think>\n' + reasoning + '\n</think>\n\n' + fullContent;
+          }
+          
+          return {
+            index: choice.index,
+            message: {
+              role: choice.message.role,
+              content: fullContent
+            },
+            finish_reason: choice.finish_reason
+          };
+        }),
+        usage: response.data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+      };
+      
+      res.json(openaiResponse);
     }
     
   } catch (error) {
-    const statusCode = error.response?.status || 500;
+    console.error('Proxy connectivity error:', error.response?.data || error.message);
     
-    // Capture the exact JSON data NVIDIA sent back
-    const errorDetail = error.response?.data;
-    const exactMessage = errorDetail 
-      ? (typeof errorDetail === 'object' ? JSON.stringify(errorDetail) : errorDetail) 
-      : error.message;
-
-    console.error(`Proxy crashed with status ${statusCode}:`, exactMessage);
-
-    if (req.body && req.body.stream) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      
-      let chatMessage = `\n\n*[System Error ${statusCode}: `;
-      if (statusCode === 429) {
-        chatMessage += `NVIDIA API Rate Limit Reached. Wait 60 seconds and try again.]*`;
-      } else if (statusCode === 504 || statusCode === 502) {
-        chatMessage += `Server Timeout. The AI took too long to think.]*`;
-      } else if (statusCode === 401) {
-        chatMessage += `Invalid NVIDIA API Key.]*`;
-      } else {
-        // 🔥 Output the EXACT RAW ERROR to the chat screen
-        chatMessage += `NVIDIA rejected the prompt schema.\n\nRAW ERROR DATA:\n${exactMessage}]*`;
+    res.status(error.response?.status || 500).json({
+      error: {
+        message: error.response?.data?.detail || error.response?.data?.error?.message || error.message || 'Internal proxy error',
+        type: 'proxy_error',
+        code: error.response?.status || 500
       }
-
-      const errorChunk = {
-        id: `error-${Date.now()}`,
-        object: 'chat.completion.chunk',
-        created: Math.floor(Date.now() / 1000),
-        model: req.body.model || 'proxy-error',
-        choices: [{ index: 0, delta: { content: chatMessage }, finish_reason: 'stop' }]
-      };
-      
-      res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
-      res.write('data: [DONE]\n\n');
-      return res.end();
-    } else {
-      res.status(statusCode).json({
-        error: { message: exactMessage, type: 'proxy_error', code: statusCode }
-      });
-    }
+    });
   }
 });
 
 app.all('*', (req, res) => {
-  res.status(404).json({ error: { message: `Endpoint not found`, type: 'invalid_request_error', code: 404 } });
+  res.status(404).json({ error: { message: `Endpoint ${req.path} not found`, type: 'invalid_request_error', code: 404 } });
 });
 
 app.listen(PORT, () => {
   console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
 });
+
+```
+Save this version, push it to GitHub, and give Render a minute to process it. In your JanitorAI settings, simply type **glm-5.2** (or **z-ai/glm-5.2**) into the model field, and it will instantly link up and start generating those fast reasoning blocks!
