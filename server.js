@@ -26,7 +26,7 @@ const MODEL_MAPPING = {
   'qwen-122b': 'qwen/qwen3.5-122b-a10b',         
   'deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
-  'z-ai/glm-5.1': 'z-ai/glm-5.2', // Auto-upgrades old GLM requests
+  'z-ai/glm-5.1': 'z-ai/glm-5.2', // Auto-upgrades deprecated GLM 5.1 requests
   'glm-5.1': 'z-ai/glm-5.2'
 };
 
@@ -62,16 +62,28 @@ app.post('/v1/chat/completions', async (req, res) => {
     // Exact match or safe fallback to the new GLM-5.2 model
     let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'z-ai/glm-5.2';
     
-    // Construct the payload utilizing the OFFICIAL top-level reasoning_effort parameter
+    // 🔥 THE FIX 1: Message Sanitization
+    // Strip out JanitorAI's hidden 'name' fields to prevent SGLang Pydantic validation 400 errors
+    const sanitizedMessages = messages.map(msg => ({
+      role: msg.role,
+      content: msg.content
+    }));
+    
+    // Construct the standard payload
     const nimRequest = {
       model: nimModel,
-      messages: messages,
+      messages: sanitizedMessages,
       temperature: temperature ?? 0.6,
       top_p: req.body.top_p ?? 1.0,
       max_tokens: max_tokens ? Math.min(max_tokens, 8192) : 4096,
-      stream: stream || false,
-      reasoning_effort: "high" // <--- THE FIX: NIM strictly requires this at the root now
+      stream: stream || false
     };
+    
+    // Model-specific reasoning triggers (Only apply if strictly required by the specific model family)
+    if (nimModel.includes('deepseek-v4')) {
+      nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
+    }
+    // Note: GLM-5.2 enables reasoning natively without flags. Extra flags cause strict validation drops.
     
     // Request execution
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
@@ -183,11 +195,18 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
     
   } catch (error) {
-    console.error('Proxy connectivity error:', error.response?.data || error.message);
+    // 🔥 THE FIX 2: Transparent Error Logging
+    // This forces the proxy to print the *exact* JSON breakdown of what NVIDIA didn't like
+    const errorDetail = error.response?.data;
+    const exactMessage = errorDetail 
+      ? (typeof errorDetail === 'object' ? JSON.stringify(errorDetail) : errorDetail) 
+      : error.message;
+
+    console.error('Proxy connectivity error:', exactMessage);
     
     res.status(error.response?.status || 500).json({
       error: {
-        message: error.response?.data?.detail || error.response?.data?.error?.message || error.message || 'Internal proxy error',
+        message: `NVIDIA API Error: ${exactMessage}`,
         type: 'proxy_error',
         code: error.response?.status || 500
       }
