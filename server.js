@@ -17,7 +17,7 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 
 const SHOW_REASONING = true; 
 
-// Model mapping - Added MiniMax M3 and M2.7 Support alongside Step 3.7 & GLM 5.2
+// Model mapping
 const MODEL_MAPPING = {
   'step-3.7-flash': 'stepfun-ai/step-3.7-flash',
   'stepfun-ai/step-3.7-flash': 'stepfun-ai/step-3.7-flash', 
@@ -47,8 +47,6 @@ app.get('/v1/models', (req, res) => {
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
-    
-    // Exact match or fallback automatically to the live step-3.7-flash engine
     let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'stepfun-ai/step-3.7-flash';
     
     // Normalize and clean chat history roles
@@ -57,7 +55,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       if (!msg.content || typeof msg.content !== 'string' || msg.content.trim() === '') continue;
       
       let role = msg.role.toLowerCase();
-      
       if (role === 'system') {
         role = 'user'; 
       }
@@ -85,7 +82,16 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: stream || false
     };
     
-    // DeepSeek family reasoning parameters
+    // 🔥 THE FIX 1: Inject explicit structural activation keys right into the root payload
+    if (nimModel.includes('step-3.7') || nimModel.includes('glm-5.2')) {
+      nimRequest.reasoning_effort = "high";
+    }
+    
+    if (nimModel.includes('minimax')) {
+      nimRequest.reasoning_effort = "high";
+      nimRequest.thinking = "enabled"; 
+    }
+    
     if (nimModel.includes('deepseek-v4')) {
       nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
     }
@@ -128,22 +134,31 @@ app.post('/v1/chat/completions', async (req, res) => {
                 const reasoning = delta.reasoning_content || delta.reasoning || '';
                 const content = delta.content || '';
                 
+                // 🔥 THE FIX 2: Bulletproof key tracking that captures the transition from thinking to writing
+                const hasContent = 'content' in delta;
+                
                 if (SHOW_REASONING) {
                   let combinedContent = '';
-                  if (reasoning && !reasoningStarted) {
-                    combinedContent = '<think>\n' + reasoning;
-                    reasoningStarted = true;
-                  } else if (reasoning) {
-                    combinedContent = reasoning;
+                  
+                  if (reasoning) {
+                    if (!reasoningStarted) {
+                      combinedContent = '<think>\n' + reasoning;
+                      reasoningStarted = true;
+                    } else {
+                      combinedContent = reasoning;
+                    }
                   }
                   
-                  if (content && reasoningStarted) {
-                    combinedContent += '\n</think>\n\n' + content;
-                    reasoningStarted = false;
-                  } else if (content) {
-                    combinedContent += content;
+                  if (hasContent) {
+                    if (reasoningStarted) {
+                      combinedContent += '\n</think>\n\n' + content;
+                      reasoningStarted = false;
+                    } else {
+                      combinedContent += content;
+                    }
                   }
-                  data.choices[0].delta.content = combinedContent || content;
+                  
+                  data.choices[0].delta.content = combinedContent;
                 } else {
                   data.choices[0].delta.content = content;
                 }
@@ -165,7 +180,29 @@ app.post('/v1/chat/completions', async (req, res) => {
         res.end();
       });
     } else {
-      res.json({}); 
+      // Non-streaming fallback block
+      const openaiResponse = {
+        id: `chatcmpl-${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: model,
+        choices: response.data.choices.map(choice => {
+          let fullContent = choice.message?.content || '';
+          const reasoning = choice.message?.reasoning_content || choice.message?.reasoning;
+          
+          if (SHOW_REASONING && reasoning) {
+            fullContent = '<think>\n' + reasoning + '\n</think>\n\n' + fullContent;
+          }
+          
+          return {
+            index: choice.index,
+            message: { role: choice.message.role, content: fullContent },
+            finish_reason: choice.finish_reason
+          };
+        }),
+        usage: response.data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+      };
+      res.json(openaiResponse); 
     }
     
   } catch (error) {
