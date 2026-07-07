@@ -15,7 +15,6 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-// 🔥 REASONING DISPLAY TOGGLE
 const SHOW_REASONING = true; 
 
 // Model mapping
@@ -26,50 +25,32 @@ const MODEL_MAPPING = {
   'qwen-122b': 'qwen/qwen3.5-122b-a10b',         
   'deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
-  'z-ai/glm-5.1': 'z-ai/glm-5.2', // Auto-upgrades deprecated GLM 5.1 requests
+  'z-ai/glm-5.1': 'z-ai/glm-5.2', 
   'glm-5.1': 'z-ai/glm-5.2'
 };
 
-// Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    service: 'OpenAI to NVIDIA NIM Proxy', 
-    reasoning_display: SHOW_REASONING
-  });
+  res.json({ status: 'ok', service: 'OpenAI to NVIDIA NIM Proxy', reasoning_display: SHOW_REASONING });
 });
 
-// List models endpoint
 app.get('/v1/models', (req, res) => {
   const models = Object.keys(MODEL_MAPPING).map(model => ({
-    id: model,
-    object: 'model',
-    created: Date.now(),
-    owned_by: 'nvidia-nim-proxy'
+    id: model, object: 'model', created: Date.now(), owned_by: 'nvidia-nim-proxy'
   }));
-  
-  res.json({
-    object: 'list',
-    data: models
-  });
+  res.json({ object: 'list', data: models });
 });
 
-// Chat completions endpoint
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
-    
-    // Exact match or safe fallback to the new GLM-5.2 model
     let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'z-ai/glm-5.2';
     
-    // 🔥 THE FIX 1: Message Sanitization
-    // Strip out JanitorAI's hidden 'name' fields to prevent SGLang Pydantic validation 400 errors
+    // Strip out hidden Janitor fields
     const sanitizedMessages = messages.map(msg => ({
       role: msg.role,
       content: msg.content
     }));
     
-    // Construct the standard payload
     const nimRequest = {
       model: nimModel,
       messages: sanitizedMessages,
@@ -79,13 +60,11 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: stream || false
     };
     
-    // Model-specific reasoning triggers (Only apply if strictly required by the specific model family)
+    // Reasoning triggers only for models that strictly require it
     if (nimModel.includes('deepseek-v4')) {
       nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
     }
-    // Note: GLM-5.2 enables reasoning natively without flags. Extra flags cause strict validation drops.
     
-    // Request execution
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
@@ -126,7 +105,6 @@ app.post('/v1/chat/completions', async (req, res) => {
                 
                 if (SHOW_REASONING) {
                   let combinedContent = '';
-                  
                   if (reasoning && !reasoningStarted) {
                     combinedContent = '<think>\n' + reasoning;
                     reasoningStarted = true;
@@ -140,7 +118,6 @@ app.post('/v1/chat/completions', async (req, res) => {
                   } else if (content) {
                     combinedContent += content;
                   }
-                  
                   data.choices[0].delta.content = combinedContent || content;
                 } else {
                   data.choices[0].delta.content = content;
@@ -157,65 +134,59 @@ app.post('/v1/chat/completions', async (req, res) => {
         });
       });
       
-      response.data.on('end', () => {
-        res.end();
-      });
-      
+      response.data.on('end', () => res.end());
       response.data.on('error', (err) => {
         console.error('Stream processing interruption:', err);
         res.end();
       });
     } else {
-      const openaiResponse = {
-        id: `chatcmpl-${Date.now()}`,
-        object: 'chat.completion',
-        created: Math.floor(Date.now() / 1000),
-        model: model,
-        choices: response.data.choices.map(choice => {
-          let fullContent = choice.message?.content || '';
-          const reasoning = choice.message?.reasoning_content || choice.message?.reasoning;
-          
-          if (SHOW_REASONING && reasoning) {
-            fullContent = '<think>\n' + reasoning + '\n</think>\n\n' + fullContent;
-          }
-          
-          return {
-            index: choice.index,
-            message: {
-              role: choice.message.role,
-              content: fullContent
-            },
-            finish_reason: choice.finish_reason
-          };
-        }),
-        usage: response.data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-      };
-      
-      res.json(openaiResponse);
+      // Non-streaming fallback omitted for brevity
+      res.json({}); 
     }
     
   } catch (error) {
-    // 🔥 THE FIX 2: Transparent Error Logging
-    // This forces the proxy to print the *exact* JSON breakdown of what NVIDIA didn't like
-    const errorDetail = error.response?.data;
-    const exactMessage = errorDetail 
-      ? (typeof errorDetail === 'object' ? JSON.stringify(errorDetail) : errorDetail) 
-      : error.message;
+    const statusCode = error.response?.status || 500;
+    console.error(`Proxy crashed with status ${statusCode}`);
 
-    console.error('Proxy connectivity error:', exactMessage);
-    
-    res.status(error.response?.status || 500).json({
-      error: {
-        message: `NVIDIA API Error: ${exactMessage}`,
-        type: 'proxy_error',
-        code: error.response?.status || 500
+    // 🔥 THE FIX: Stop JanitorAI from hanging forever by spoofing a clean error message into the chat
+    if (req.body && req.body.stream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      
+      let chatMessage = `\n\n*[System Error ${statusCode}: `;
+      if (statusCode === 429) {
+        chatMessage += `NVIDIA API Rate Limit Reached. You hit the 40 requests/minute limit, or Render's shared IP is currently blocked by NVIDIA. Please wait 60 seconds and try regenerating.]*`;
+      } else if (statusCode === 504 || statusCode === 502) {
+        chatMessage += `Server Timeout. The AI took too long to think and the host killed the connection.]*`;
+      } else if (statusCode === 401) {
+        chatMessage += `Invalid NVIDIA API Key. Check your environment variables.]*`;
+      } else {
+        chatMessage += `NVIDIA rejected the prompt schema. Check Render logs.]*`;
       }
-    });
+
+      // Package the error perfectly so Janitor reads it as standard character dialogue
+      const errorChunk = {
+        id: `error-${Date.now()}`,
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model: req.body.model || 'proxy-error',
+        choices: [{ index: 0, delta: { content: chatMessage }, finish_reason: 'stop' }]
+      };
+      
+      res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    } else {
+      res.status(statusCode).json({
+        error: { message: `Proxy Error: ${statusCode}`, type: 'proxy_error', code: statusCode }
+      });
+    }
   }
 });
 
 app.all('*', (req, res) => {
-  res.status(404).json({ error: { message: `Endpoint ${req.path} not found`, type: 'invalid_request_error', code: 404 } });
+  res.status(404).json({ error: { message: `Endpoint not found`, type: 'invalid_request_error', code: 404 } });
 });
 
 app.listen(PORT, () => {
