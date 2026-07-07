@@ -8,7 +8,6 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
-// 💥 50MB limit to handle JanitorAI's massive chat histories
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
@@ -19,7 +18,7 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 // 🔥 REASONING DISPLAY TOGGLE
 const SHOW_REASONING = true; 
 
-// Model mapping - Added GLM 5.2 Native Routing
+// Model mapping
 const MODEL_MAPPING = {
   'glm-5.2': 'z-ai/glm-5.2',
   'z-ai/glm-5.2': 'z-ai/glm-5.2',
@@ -27,8 +26,8 @@ const MODEL_MAPPING = {
   'qwen-122b': 'qwen/qwen3.5-122b-a10b',         
   'deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
-  'z-ai/glm-5.1': 'stepfun-ai/step-3.7-flash', 
-  'glm-5.1': 'stepfun-ai/step-3.7-flash'
+  'z-ai/glm-5.1': 'z-ai/glm-5.2', // Auto-upgrades old GLM requests
+  'glm-5.1': 'z-ai/glm-5.2'
 };
 
 // Health check endpoint
@@ -63,7 +62,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     // Exact match or safe fallback to the new GLM-5.2 model
     let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'z-ai/glm-5.2';
     
-    // Construct the payload with the REQUIRED thinking triggers
+    // Construct the payload utilizing the OFFICIAL top-level reasoning_effort parameter
     const nimRequest = {
       model: nimModel,
       messages: messages,
@@ -71,10 +70,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       top_p: req.body.top_p ?? 1.0,
       max_tokens: max_tokens ? Math.min(max_tokens, 8192) : 4096,
       stream: stream || false,
-      chat_template_kwargs: {
-        enable_thinking: true,
-        thinking: true
-      }
+      reasoning_effort: "high" // <--- THE FIX: NIM strictly requires this at the root now
     };
     
     // Request execution
