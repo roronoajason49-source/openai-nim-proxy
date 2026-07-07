@@ -1,6 +1,3 @@
-That is fantastic news. NVIDIA officially deploying GLM 5.2 to their free tier is huge for long-context roleplay, especially since its predecessor was so fast. Since GLM 5.2 shares the same advanced reasoning architecture, the same thinking configuration we've already set up will plug right into it perfectly.
-Here is your updated server.js file. I have added glm-5.2 directly into your model mapping, and I also updated the fallback system so that if JanitorAI sends any unrecognized model string, it will default directly to z-ai/glm-5.2.
-```javascript
 // server.js - OpenAI to NVIDIA NIM API Proxy
 const express = require('express');
 const cors = require('cors');
@@ -209,6 +206,3 @@ app.all('*', (req, res) => {
 app.listen(PORT, () => {
   console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
 });
-
-```
-Save this version, push it to GitHub, and give Render a minute to process it. In your JanitorAI settings, simply type **glm-5.2** (or **z-ai/glm-5.2**) into the model field, and it will instantly link up and start generating those fast reasoning blocks!
