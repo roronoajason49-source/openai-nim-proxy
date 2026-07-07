@@ -82,14 +82,15 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: stream || false
     };
     
-    // 🔥 THE FIX 1: Inject explicit structural activation keys right into the root payload
+    // Model-specific triggers
     if (nimModel.includes('step-3.7') || nimModel.includes('glm-5.2')) {
       nimRequest.reasoning_effort = "high";
     }
     
+    // 💥 THE FIX: Pass the required object schema for MiniMax thinking parameters
     if (nimModel.includes('minimax')) {
       nimRequest.reasoning_effort = "high";
-      nimRequest.thinking = "enabled"; 
+      nimRequest.thinking = { type: "enabled" }; 
     }
     
     if (nimModel.includes('deepseek-v4')) {
@@ -134,7 +135,6 @@ app.post('/v1/chat/completions', async (req, res) => {
                 const reasoning = delta.reasoning_content || delta.reasoning || '';
                 const content = delta.content || '';
                 
-                // 🔥 THE FIX 2: Bulletproof key tracking that captures the transition from thinking to writing
                 const hasContent = 'content' in delta;
                 
                 if (SHOW_REASONING) {
@@ -180,7 +180,6 @@ app.post('/v1/chat/completions', async (req, res) => {
         res.end();
       });
     } else {
-      // Non-streaming fallback block
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
