@@ -45,22 +45,47 @@ app.post('/v1/chat/completions', async (req, res) => {
     const { model, messages, temperature, max_tokens, stream } = req.body;
     let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'z-ai/glm-5.2';
     
-    // Strip out hidden Janitor fields
-    const sanitizedMessages = messages.map(msg => ({
-      role: msg.role,
-      content: msg.content
-    }));
+    // 🔥 THE FIX: Aggressive Message Normalizer
+    const normalizedMessages = [];
+    
+    for (const msg of messages) {
+      // 1. Drop completely empty messages
+      if (!msg.content || typeof msg.content !== 'string' || msg.content.trim() === '') continue;
+      
+      let role = msg.role.toLowerCase();
+      
+      // 2. Convert mid-chat 'system' prompts (like Author's Notes) into 'user' prompts
+      if (role === 'system' && normalizedMessages.length > 0) {
+        role = 'user'; 
+      }
+      
+      // 3. Force Strict Alternation: Merge consecutive messages of the same role
+      if (normalizedMessages.length > 0 && normalizedMessages[normalizedMessages.length - 1].role === role) {
+        normalizedMessages[normalizedMessages.length - 1].content += '\n\n' + msg.content;
+      } else {
+        normalizedMessages.push({ role, content: msg.content });
+      }
+    }
+    
+    // 4. Ensure the chat history doesn't start with an assistant reply
+    if (normalizedMessages.length > 0 && normalizedMessages[0].role === 'assistant') {
+      normalizedMessages.unshift({ role: 'user', content: 'Hello.' });
+    }
+
+    // Safely clamp numbers to prevent schema threshold crashes
+    const safe_max_tokens = (parseInt(max_tokens) > 0) ? Math.min(parseInt(max_tokens), 4096) : 4096;
+    const safe_temp = (parseFloat(temperature) > 0) ? parseFloat(temperature) : 0.6;
     
     const nimRequest = {
       model: nimModel,
-      messages: sanitizedMessages,
-      temperature: temperature ?? 0.6,
+      messages: normalizedMessages,
+      temperature: safe_temp,
       top_p: req.body.top_p ?? 1.0,
-      max_tokens: max_tokens ? Math.min(max_tokens, 8192) : 4096,
+      max_tokens: safe_max_tokens,
       stream: stream || false
     };
     
-    // Reasoning triggers only for models that strictly require it
+    // Append reasoning tags ONLY for models that strictly require custom flags
     if (nimModel.includes('deepseek-v4')) {
       nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
     }
@@ -140,15 +165,20 @@ app.post('/v1/chat/completions', async (req, res) => {
         res.end();
       });
     } else {
-      // Non-streaming fallback omitted for brevity
       res.json({}); 
     }
     
   } catch (error) {
     const statusCode = error.response?.status || 500;
-    console.error(`Proxy crashed with status ${statusCode}`);
+    
+    // Capture the exact JSON data NVIDIA sent back
+    const errorDetail = error.response?.data;
+    const exactMessage = errorDetail 
+      ? (typeof errorDetail === 'object' ? JSON.stringify(errorDetail) : errorDetail) 
+      : error.message;
 
-    // 🔥 THE FIX: Stop JanitorAI from hanging forever by spoofing a clean error message into the chat
+    console.error(`Proxy crashed with status ${statusCode}:`, exactMessage);
+
     if (req.body && req.body.stream) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
@@ -156,16 +186,16 @@ app.post('/v1/chat/completions', async (req, res) => {
       
       let chatMessage = `\n\n*[System Error ${statusCode}: `;
       if (statusCode === 429) {
-        chatMessage += `NVIDIA API Rate Limit Reached. You hit the 40 requests/minute limit, or Render's shared IP is currently blocked by NVIDIA. Please wait 60 seconds and try regenerating.]*`;
+        chatMessage += `NVIDIA API Rate Limit Reached. Wait 60 seconds and try again.]*`;
       } else if (statusCode === 504 || statusCode === 502) {
-        chatMessage += `Server Timeout. The AI took too long to think and the host killed the connection.]*`;
+        chatMessage += `Server Timeout. The AI took too long to think.]*`;
       } else if (statusCode === 401) {
-        chatMessage += `Invalid NVIDIA API Key. Check your environment variables.]*`;
+        chatMessage += `Invalid NVIDIA API Key.]*`;
       } else {
-        chatMessage += `NVIDIA rejected the prompt schema. Check Render logs.]*`;
+        // 🔥 Output the EXACT RAW ERROR to the chat screen
+        chatMessage += `NVIDIA rejected the prompt schema.\n\nRAW ERROR DATA:\n${exactMessage}]*`;
       }
 
-      // Package the error perfectly so Janitor reads it as standard character dialogue
       const errorChunk = {
         id: `error-${Date.now()}`,
         object: 'chat.completion.chunk',
@@ -179,7 +209,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       return res.end();
     } else {
       res.status(statusCode).json({
-        error: { message: `Proxy Error: ${statusCode}`, type: 'proxy_error', code: statusCode }
+        error: { message: exactMessage, type: 'proxy_error', code: statusCode }
       });
     }
   }
