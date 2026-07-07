@@ -17,11 +17,12 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 
 const SHOW_REASONING = true; 
 
-// Model mapping
+// Model mapping - Fully supports both Step 3.7 Flash and GLM 5.2
 const MODEL_MAPPING = {
+  'step-3.7-flash': 'stepfun-ai/step-3.7-flash',
+  'stepfun-ai/step-3.7-flash': 'stepfun-ai/step-3.7-flash', // Full direct match key
   'glm-5.2': 'z-ai/glm-5.2',
   'z-ai/glm-5.2': 'z-ai/glm-5.2',
-  'step-3.7-flash': 'stepfun-ai/step-3.7-flash', 
   'qwen-122b': 'qwen/qwen3.5-122b-a10b',         
   'deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
@@ -43,7 +44,9 @@ app.get('/v1/models', (req, res) => {
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
-    let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'z-ai/glm-5.2';
+    
+    // Exact match or fallback automatically to the live step-3.7-flash engine
+    let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'stepfun-ai/step-3.7-flash';
     
     // Normalize and clean chat history roles
     const normalizedMessages = [];
@@ -52,7 +55,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       
       let role = msg.role.toLowerCase();
       
-      // Convert system prompts or author notes into user prompts to satisfy strict engine schemas
       if (role === 'system') {
         role = 'user'; 
       }
@@ -80,6 +82,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: stream || false
     };
     
+    // Apply internal parameter setups specifically for DeepSeek if targeted
     if (nimModel.includes('deepseek-v4')) {
       nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
     }
@@ -166,7 +169,6 @@ app.post('/v1/chat/completions', async (req, res) => {
     const statusCode = error.response?.status || 500;
     let exactMessage = error.message;
 
-    // 💥 THE FIX: Safely extract text from the raw Axios error stream object
     if (error.response?.data) {
       if (typeof error.response.data.on === 'function') {
         try {
