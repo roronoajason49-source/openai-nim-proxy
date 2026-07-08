@@ -83,11 +83,18 @@ app.post('/v1/chat/completions', async (req, res) => {
     };
     
     // Model-specific triggers
-    if (nimModel.includes('step-3.7') || nimModel.includes('glm-5.2')) {
+    if (nimModel.includes('step-3.7')) {
       nimRequest.reasoning_effort = "high";
     }
     
-    // 💥 THE FIX: Pass the required object schema for MiniMax thinking parameters
+    // 🔥 THE FIX: Route GLM-5.2 thinking parameters inside chat_template_kwargs for SGLang
+    if (nimModel.includes('glm-5.2')) {
+      nimRequest.chat_template_kwargs = { 
+        enable_thinking: true, 
+        reasoning_effort: "high" 
+      };
+    }
+    
     if (nimModel.includes('minimax')) {
       nimRequest.reasoning_effort = "high";
       nimRequest.thinking = { type: "enabled" }; 
