@@ -11,8 +11,13 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// NVIDIA NIM API configuration
-const NIM_API_BASE = process.env.NIM_API_BASE || '[https://integrate.api.nvidia.com/v1](https://integrate.api.nvidia.com/v1)';
+// 🔥 Auto-fix URL formatting to completely prevent 500 Invalid URL network crashes
+let NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
+if (!NIM_API_BASE.startsWith('http://') && !NIM_API_BASE.startsWith('https://')) {
+  NIM_API_BASE = 'https://' + NIM_API_BASE;
+}
+NIM_API_BASE = NIM_API_BASE.replace(/\/+$/, '');
+
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
 const SHOW_REASONING = true; 
@@ -89,8 +94,11 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: stream || false
     };
     
-    // 🔥 THE FIX 1: Apply strict thinking object to ALL reasoning models, including GLM-5.2
-    if (nimModel.includes('step-3.7') || nimModel.includes('glm-5.2') || nimModel.includes('minimax')) {
+    if (nimModel.includes('step-3.7') || nimModel.includes('glm-5.2')) {
+      nimRequest.reasoning_effort = "high";
+    }
+    
+    if (nimModel.includes('minimax')) {
       nimRequest.reasoning_effort = "high";
       nimRequest.thinking = { type: "enabled" }; 
     }
@@ -140,7 +148,6 @@ app.post('/v1/chat/completions', async (req, res) => {
                 if (SHOW_REASONING) {
                   let combinedContent = '';
                   
-                  // 🔥 THE FIX 2: Use Markdown Code Blocks instead of HTML tags to bypass JanitorAI's filter
                   if (reasoning) {
                     if (!reasoningStarted) {
                       combinedContent += '```thought\n' + reasoning;
@@ -151,7 +158,6 @@ app.post('/v1/chat/completions', async (req, res) => {
                   }
                   
                   if (content) {
-                    // Safety check in case the model leaks native <think> tags into the content stream
                     let safeContent = content.replace(/<think>/g, '```thought\n').replace(/<\/think>/g, '\n```\n');
                     
                     if (reasoningStarted) {
@@ -162,7 +168,6 @@ app.post('/v1/chat/completions', async (req, res) => {
                     }
                   }
                   
-                  // Catch the invisible empty-string transition gap safely
                   if (reasoningStarted && delta.hasOwnProperty('content') && delta.content === '' && !reasoning) {
                     combinedContent += '\n```\n\n';
                     reasoningStarted = false;
@@ -198,12 +203,24 @@ app.post('/v1/chat/completions', async (req, res) => {
     let exactMessage = error.message;
 
     if (error.response?.data) {
-      if (typeof error.response.data === 'object') {
+      if (typeof error.response.data.on === 'function') {
+        try {
+          const chunks = [];
+          for await (const chunk of error.response.data) {
+            chunks.push(chunk);
+          }
+          exactMessage = Buffer.concat(chunks).toString();
+        } catch (streamErr) {
+          exactMessage = `Failed to parse NVIDIA error stream: ${error.message}`;
+        }
+      } else if (typeof error.response.data === 'object') {
         exactMessage = JSON.stringify(error.response.data);
       } else {
         exactMessage = error.response.data;
       }
     }
+
+    console.error(`Proxy crashed with status ${statusCode}:`, exactMessage);
 
     if (req.body && req.body.stream) {
       res.setHeader('Content-Type', 'text/event-stream');
