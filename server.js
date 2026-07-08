@@ -46,10 +46,9 @@ app.get('/v1/models', (req, res) => {
 
 app.post('/v1/chat/completions', async (req, res) => {
   try {
-    const { model, messages, temperature, max_tokens, stream } = req.body;
+    const { model, messages, temperature, stream } = req.body;
     let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'stepfun-ai/step-3.7-flash';
     
-    // Normalize and clean chat history roles
     const normalizedMessages = [];
     let isFirstSystem = true;
 
@@ -79,7 +78,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       normalizedMessages.splice(1, 0, { role: 'user', content: 'Hello.' });
     }
 
-    const safe_max_tokens = (parseInt(max_tokens) > 0) ? Math.min(parseInt(max_tokens), 4096) : 4096;
     const safe_temp = (parseFloat(temperature) > 0) ? parseFloat(temperature) : 0.6;
     
     const nimRequest = {
@@ -87,20 +85,14 @@ app.post('/v1/chat/completions', async (req, res) => {
       messages: normalizedMessages,
       temperature: safe_temp,
       top_p: req.body.top_p ?? 1.0,
-      max_tokens: safe_max_tokens,
+      // 🔥 THE FIX: Override JanitorAI's low token limits to prevent Token Starvation skipping
+      max_tokens: 4096, 
       stream: stream || false
     };
     
-    // Exact model hardware triggers
-    if (nimModel.includes('step-3.7')) {
+    // Exact model hardware triggers restored
+    if (nimModel.includes('step-3.7') || nimModel.includes('glm-5.2')) {
       nimRequest.reasoning_effort = "high";
-    }
-    
-    if (nimModel.includes('glm-5.2')) {
-      nimRequest.chat_template_kwargs = { 
-        enable_thinking: true, 
-        reasoning_effort: "high" 
-      };
     }
     
     if (nimModel.includes('minimax')) {
@@ -153,25 +145,28 @@ app.post('/v1/chat/completions', async (req, res) => {
                 if (SHOW_REASONING) {
                   let combinedContent = '';
                   
+                  // Handle reasoning stream
                   if (reasoning) {
                     if (!reasoningStarted) {
-                      combinedContent = '<think>\n' + reasoning;
+                      combinedContent += '<think>\n' + reasoning;
                       reasoningStarted = true;
                     } else {
-                      combinedContent = reasoning;
+                      combinedContent += reasoning;
                     }
                   }
                   
-                  // 🔥 THE FIX: Safely transition only when actual dialogue text appears
-                  if (content !== '') {
+                  // Handle dialogue content stream
+                  if (content) {
                     if (reasoningStarted) {
                       combinedContent += '\n</think>\n\n' + content;
                       reasoningStarted = false;
                     } else {
                       combinedContent += content;
                     }
-                  } else if (reasoningStarted && ('content' in delta) && !reasoning) {
-                    // Catch the exact transition token safely
+                  }
+                  
+                  // Catch the invisible empty-string transition gap safely
+                  if (reasoningStarted && delta.hasOwnProperty('content') && delta.content === '' && !reasoning) {
                     combinedContent += '\n</think>\n\n';
                     reasoningStarted = false;
                   }
@@ -198,28 +193,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         res.end();
       });
     } else {
-      const openaiResponse = {
-        id: `chatcmpl-${Date.now()}`,
-        object: 'chat.completion',
-        created: Math.floor(Date.now() / 1000),
-        model: model,
-        choices: response.data.choices.map(choice => {
-          let fullContent = choice.message?.content || '';
-          const reasoning = choice.message?.reasoning_content || choice.message?.reasoning;
-          
-          if (SHOW_REASONING && reasoning) {
-            fullContent = '<think>\n' + reasoning + '\n</think>\n\n' + fullContent;
-          }
-          
-          return {
-            index: choice.index,
-            message: { role: choice.message.role, content: fullContent },
-            finish_reason: choice.finish_reason
-          };
-        }),
-        usage: response.data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-      };
-      res.json(openaiResponse); 
+      res.json({}); 
     }
     
   } catch (error) {
@@ -227,24 +201,12 @@ app.post('/v1/chat/completions', async (req, res) => {
     let exactMessage = error.message;
 
     if (error.response?.data) {
-      if (typeof error.response.data.on === 'function') {
-        try {
-          const chunks = [];
-          for await (const chunk of error.response.data) {
-            chunks.push(chunk);
-          }
-          exactMessage = Buffer.concat(chunks).toString();
-        } catch (streamErr) {
-          exactMessage = `Failed to parse NVIDIA error stream: ${error.message}`;
-        }
-      } else if (typeof error.response.data === 'object') {
+      if (typeof error.response.data === 'object') {
         exactMessage = JSON.stringify(error.response.data);
       } else {
         exactMessage = error.response.data;
       }
     }
-
-    console.error(`Proxy crashed with status ${statusCode}:`, exactMessage);
 
     if (req.body && req.body.stream) {
       res.setHeader('Content-Type', 'text/event-stream');
