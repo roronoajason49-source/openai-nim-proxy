@@ -91,15 +91,12 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: stream || false
     };
     
-    // Model-specific triggers
+    // Exact model hardware triggers
     if (nimModel.includes('step-3.7')) {
       nimRequest.reasoning_effort = "high";
     }
     
-    // 🔥 THE FIX: Apply the strict root-level hardware object lock for GLM-5.2 to disable auto-skipping
     if (nimModel.includes('glm-5.2')) {
-      nimRequest.reasoning_effort = "high";
-      nimRequest.thinking = { type: "enabled" }; 
       nimRequest.chat_template_kwargs = { 
         enable_thinking: true, 
         reasoning_effort: "high" 
@@ -153,8 +150,6 @@ app.post('/v1/chat/completions', async (req, res) => {
                 const reasoning = delta.reasoning_content || delta.reasoning || '';
                 const content = delta.content || '';
                 
-                const hasContent = 'content' in delta;
-                
                 if (SHOW_REASONING) {
                   let combinedContent = '';
                   
@@ -167,13 +162,18 @@ app.post('/v1/chat/completions', async (req, res) => {
                     }
                   }
                   
-                  if (hasContent) {
+                  // 🔥 THE FIX: Safely transition only when actual dialogue text appears
+                  if (content !== '') {
                     if (reasoningStarted) {
                       combinedContent += '\n</think>\n\n' + content;
                       reasoningStarted = false;
                     } else {
                       combinedContent += content;
                     }
+                  } else if (reasoningStarted && ('content' in delta) && !reasoning) {
+                    // Catch the exact transition token safely
+                    combinedContent += '\n</think>\n\n';
+                    reasoningStarted = false;
                   }
                   
                   data.choices[0].delta.content = combinedContent;
