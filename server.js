@@ -11,13 +11,8 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// 🔥 Auto-fix URL formatting to completely prevent 500 Invalid URL network crashes
-let NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
-if (!NIM_API_BASE.startsWith('http://') && !NIM_API_BASE.startsWith('https://')) {
-  NIM_API_BASE = 'https://' + NIM_API_BASE;
-}
-NIM_API_BASE = NIM_API_BASE.replace(/\/+$/, '');
-
+// NVIDIA NIM API configuration
+const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
 const SHOW_REASONING = true; 
@@ -51,25 +46,17 @@ app.get('/v1/models', (req, res) => {
 
 app.post('/v1/chat/completions', async (req, res) => {
   try {
-    const { model, messages, temperature, stream } = req.body;
+    const { model, messages, temperature, max_tokens, stream } = req.body;
     let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'stepfun-ai/step-3.7-flash';
     
+    // Normalize and clean chat history roles
     const normalizedMessages = [];
-    let isFirstSystem = true;
-
     for (const msg of messages) {
       if (!msg.content || typeof msg.content !== 'string' || msg.content.trim() === '') continue;
       
       let role = msg.role.toLowerCase();
-      
       if (role === 'system') {
-        if (isFirstSystem && normalizedMessages.length === 0) {
-          normalizedMessages.push({ role: 'system', content: msg.content });
-          isFirstSystem = false;
-          continue;
-        } else {
-          role = 'user';
-        }
+        role = 'user'; 
       }
       
       if (normalizedMessages.length > 0 && normalizedMessages[normalizedMessages.length - 1].role === role) {
@@ -79,10 +66,11 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     }
     
-    if (normalizedMessages.length > 1 && normalizedMessages[1].role === 'assistant') {
-      normalizedMessages.splice(1, 0, { role: 'user', content: 'Hello.' });
+    if (normalizedMessages.length > 0 && normalizedMessages[0].role === 'assistant') {
+      normalizedMessages.unshift({ role: 'user', content: 'Hello.' });
     }
 
+    const safe_max_tokens = (parseInt(max_tokens) > 0) ? Math.min(parseInt(max_tokens), 4096) : 4096;
     const safe_temp = (parseFloat(temperature) > 0) ? parseFloat(temperature) : 0.6;
     
     const nimRequest = {
@@ -90,14 +78,16 @@ app.post('/v1/chat/completions', async (req, res) => {
       messages: normalizedMessages,
       temperature: safe_temp,
       top_p: req.body.top_p ?? 1.0,
-      max_tokens: 4096, 
+      max_tokens: safe_max_tokens,
       stream: stream || false
     };
     
+    // Model-specific triggers
     if (nimModel.includes('step-3.7') || nimModel.includes('glm-5.2')) {
       nimRequest.reasoning_effort = "high";
     }
     
+    // 💥 THE FIX: Pass the required object schema for MiniMax thinking parameters
     if (nimModel.includes('minimax')) {
       nimRequest.reasoning_effort = "high";
       nimRequest.thinking = { type: "enabled" }; 
@@ -145,37 +135,32 @@ app.post('/v1/chat/completions', async (req, res) => {
                 const reasoning = delta.reasoning_content || delta.reasoning || '';
                 const content = delta.content || '';
                 
+                const hasContent = 'content' in delta;
+                
                 if (SHOW_REASONING) {
                   let combinedContent = '';
                   
                   if (reasoning) {
                     if (!reasoningStarted) {
-                      combinedContent += '```thought\n' + reasoning;
+                      combinedContent = '<think>\n' + reasoning;
                       reasoningStarted = true;
                     } else {
-                      combinedContent += reasoning;
+                      combinedContent = reasoning;
                     }
                   }
                   
-                  if (content) {
-                    let safeContent = content.replace(/<think>/g, '```thought\n').replace(/<\/think>/g, '\n```\n');
-                    
+                  if (hasContent) {
                     if (reasoningStarted) {
-                      combinedContent += '\n```\n\n' + safeContent;
+                      combinedContent += '\n</think>\n\n' + content;
                       reasoningStarted = false;
                     } else {
-                      combinedContent += safeContent;
+                      combinedContent += content;
                     }
-                  }
-                  
-                  if (reasoningStarted && delta.hasOwnProperty('content') && delta.content === '' && !reasoning) {
-                    combinedContent += '\n```\n\n';
-                    reasoningStarted = false;
                   }
                   
                   data.choices[0].delta.content = combinedContent;
                 } else {
-                  data.choices[0].delta.content = content.replace(/<think>/g, '').replace(/<\/think>/g, '');
+                  data.choices[0].delta.content = content;
                 }
                 
                 delete data.choices[0].delta.reasoning_content;
@@ -195,7 +180,28 @@ app.post('/v1/chat/completions', async (req, res) => {
         res.end();
       });
     } else {
-      res.json({}); 
+      const openaiResponse = {
+        id: `chatcmpl-${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: model,
+        choices: response.data.choices.map(choice => {
+          let fullContent = choice.message?.content || '';
+          const reasoning = choice.message?.reasoning_content || choice.message?.reasoning;
+          
+          if (SHOW_REASONING && reasoning) {
+            fullContent = '<think>\n' + reasoning + '\n</think>\n\n' + fullContent;
+          }
+          
+          return {
+            index: choice.index,
+            message: { role: choice.message.role, content: fullContent },
+            finish_reason: choice.finish_reason
+          };
+        }),
+        usage: response.data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+      };
+      res.json(openaiResponse); 
     }
     
   } catch (error) {
