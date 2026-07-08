@@ -51,12 +51,21 @@ app.post('/v1/chat/completions', async (req, res) => {
     
     // Normalize and clean chat history roles
     const normalizedMessages = [];
+    let isFirstSystem = true;
+
     for (const msg of messages) {
       if (!msg.content || typeof msg.content !== 'string' || msg.content.trim() === '') continue;
       
       let role = msg.role.toLowerCase();
+      
       if (role === 'system') {
-        role = 'user'; 
+        if (isFirstSystem && normalizedMessages.length === 0) {
+          normalizedMessages.push({ role: 'system', content: msg.content });
+          isFirstSystem = false;
+          continue;
+        } else {
+          role = 'user';
+        }
       }
       
       if (normalizedMessages.length > 0 && normalizedMessages[normalizedMessages.length - 1].role === role) {
@@ -66,8 +75,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     }
     
-    if (normalizedMessages.length > 0 && normalizedMessages[0].role === 'assistant') {
-      normalizedMessages.unshift({ role: 'user', content: 'Hello.' });
+    if (normalizedMessages.length > 1 && normalizedMessages[1].role === 'assistant') {
+      normalizedMessages.splice(1, 0, { role: 'user', content: 'Hello.' });
     }
 
     const safe_max_tokens = (parseInt(max_tokens) > 0) ? Math.min(parseInt(max_tokens), 4096) : 4096;
@@ -87,8 +96,10 @@ app.post('/v1/chat/completions', async (req, res) => {
       nimRequest.reasoning_effort = "high";
     }
     
-    // 🔥 THE FIX: Route GLM-5.2 thinking parameters inside chat_template_kwargs for SGLang
+    // 🔥 THE FIX: Apply the strict root-level hardware object lock for GLM-5.2 to disable auto-skipping
     if (nimModel.includes('glm-5.2')) {
+      nimRequest.reasoning_effort = "high";
+      nimRequest.thinking = { type: "enabled" }; 
       nimRequest.chat_template_kwargs = { 
         enable_thinking: true, 
         reasoning_effort: "high" 
