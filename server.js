@@ -111,7 +111,6 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (nimModel.includes('step-3.7')) {
       nimRequest.reasoning_effort = "high";
     } else if (nimModel.includes('glm-5.2')) {
-      // 🔥 THE FIX: Override GLM-5.2 to absolute maximum reasoning depth & force thinking
       nimRequest.reasoning_effort = "max"; 
       nimRequest.chat_template_kwargs = { 
         enable_thinking: true, 
@@ -140,6 +139,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       
       let buffer = '';
       let reasoningStarted = false;
+      let usesChannelReasoning = false;
       
       response.data.on('data', (chunk) => {
         buffer += chunk.toString();
@@ -175,31 +175,48 @@ app.post('/v1/chat/completions', async (req, res) => {
                 let reasoning = delta.reasoning_content || delta.reasoning || '';
                 let content = delta.content || '';
                 
-                // Track standard inline thought tags
-                if (content.includes('<think>')) {
-                  content = content.replace(/<think>/g, b3 + 'thought\n');
-                  reasoningStarted = true;
-                }
-                if (content.includes('</think>')) {
-                  content = content.replace(/<\/think>/g, '\n' + b3 + '\n\n');
-                  reasoningStarted = false;
-                }
-                
                 if (SHOW_REASONING) {
                   let combinedContent = '';
                   
+                  // Scenario 1: Dedicated Reasoning Channel is active
                   if (reasoning) {
+                    usesChannelReasoning = true;
                     if (!reasoningStarted) {
                       combinedContent += b3 + 'thought\n';
                       reasoningStarted = true;
                     }
                     combinedContent += reasoning;
-                  } else if (content) {
-                    // 🔥 THE FIX: Transition out of thinking mode only when REAL dialogue text arrives
-                    if (reasoningStarted) {
-                      combinedContent += '\n' + b3 + '\n\n';
-                      reasoningStarted = false;
+                  }
+                  
+                  // Scenario 2: Main Content Channel is streaming
+                  if (content) {
+                    if (content.includes('<think>')) {
+                      usesChannelReasoning = false; // Model is using raw tag markers in content stream
+                      if (!reasoningStarted) {
+                        combinedContent += b3 + 'thought\n';
+                        reasoningStarted = true;
+                      }
+                      content = content.replace(/<think>/g, '');
                     }
+                    
+                    let hasEndTag = content.includes('</think>');
+                    if (hasEndTag) {
+                      content = content.replace(/<\/think>/g, '');
+                    }
+                    
+                    // Handle dynamic state boundaries
+                    if (reasoningStarted) {
+                      if (usesChannelReasoning && !reasoning) {
+                        // In Dedicated Mode, close the box the instant a dialogue token is received
+                        combinedContent += '\n' + b3 + '\n\n';
+                        reasoningStarted = false;
+                      } else if (!usesChannelReasoning && hasEndTag) {
+                        // In Tag Mode, only close the box if the model sends its final </think> tag
+                        combinedContent += '\n' + b3 + '\n\n';
+                        reasoningStarted = false;
+                      }
+                    }
+                    
                     combinedContent += content;
                   }
                   
@@ -261,6 +278,19 @@ app.post('/v1/chat/completions', async (req, res) => {
       return res.end();
     } else {
       res.status(statusCode).json({
+        error: { message: exactMessage, type: 'proxy_error', code: statusCode }
+      });
+    }
+  }
+});
+
+app.all('*', (req, res) => {
+  res.status(404).json({ error: { message: `Endpoint not found`, type: 'invalid_request_error', code: 404 } });
+});
+
+app.listen(PORT, () => {
+  console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
+});e).json({
         error: { message: exactMessage, type: 'proxy_error', code: statusCode }
       });
     }
