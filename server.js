@@ -130,9 +130,9 @@ app.post('/v1/chat/completions', async (req, res) => {
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
         
-        lines.forEach(line => {
+        for (let line of lines) {
           line = line.trim();
-          if (!line) return; 
+          if (!line) continue; 
           
           if (line.startsWith('data: ')) {
             if (line.includes('[DONE]')) {
@@ -143,3 +143,4 @@ app.post('/v1/chat/completions', async (req, res) => {
                   created: Math.floor(Date.now() / 1000),
                   model: nimModel,
                   choices: [{ index: 0, delta: { content: '\n
+http://googleusercontent.com/immersive_entry_chip/0
