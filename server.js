@@ -239,7 +239,37 @@ app.post('/v1/chat/completions', async (req, res) => {
         res.end();
       });
     } else {
-      res.json({}); 
+      // Robust Non-Stream Response Handler
+      const openaiResponse = {
+        id: `chatcmpl-${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: model,
+        choices: response.data.choices.map(choice => {
+          let fullContent = choice.message?.content || '';
+          let reasoning = choice.message?.reasoning_content || choice.message?.reasoning || '';
+
+          if (SHOW_REASONING) {
+            if (reasoning) {
+              fullContent = '<think>\n' + reasoning.trim() + '\n</think>\n\n' + fullContent;
+            } else if (fullContent.includes('<think>')) {
+              if (!fullContent.includes('</think>')) {
+                fullContent = fullContent.replace(/<think>/g, '<think>\n') + '\n</think>';
+              }
+            }
+          } else {
+            fullContent = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+          }
+
+          return {
+            index: choice.index,
+            message: { role: choice.message.role, content: fullContent },
+            finish_reason: choice.finish_reason || 'stop'
+          };
+        }),
+        usage: response.data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+      };
+      res.json(openaiResponse); 
     }
     
   } catch (error) {
@@ -275,52 +305,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       return res.end();
     } else {
       res.status(statusCode).json({
-        error: { message: exactMessage, type: 'proxy_error', code: statusCode }
-      });
-    }
-  }
-});
-
-app.all('*', (req, res) => {
-  res.status(404).json({ error: { message: `Endpoint not found`, type: 'invalid_request_error', code: 404 } });
-});
-
-app.listen(PORT, () => {
-  console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
-}); && req.body.stream) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Accel-Buffering', 'no');
-      
-      let chatMessage = `\n\n*[System Error ${statusCode}: NVIDIA rejected the request.*\n\n**REASON:**\n\`${exactMessage}\`]*`;
-
-      const errorChunk = {
-        id: `error-${Date.now()}`,
-        object: 'chat.completion.chunk',
-        created: Math.floor(Date.now() / 1000),
-        model: req.body.model || 'proxy-error',
-        choices: [{ index: 0, delta: { content: chatMessage }, finish_reason: 'stop' }]
-      };
-      
-      res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
-      res.write('data: [DONE]\n\n');
-      return res.end();
-    } else {
-      res.status(statusCode).json({
-        error: { message: exactMessage, type: 'proxy_error', code: statusCode }
-      });
-    }
-  }
-});
-
-app.all('*', (req, res) => {
-  res.status(404).json({ error: { message: `Endpoint not found`, type: 'invalid_request_error', code: 404 } });
-});
-
-app.listen(PORT, () => {
-  console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
-});e).json({
         error: { message: exactMessage, type: 'proxy_error', code: statusCode }
       });
     }
