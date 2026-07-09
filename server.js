@@ -14,14 +14,27 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 // Dynamic string constructor to prevent mobile app rendering glitches
 const b3 = String.fromCharCode(96, 96, 96);
 
-// Auto-fix API URL layouts
-let NIM_API_BASE = process.env.NIM_API_BASE || '[https://integrate.api.nvidia.com/v1](https://integrate.api.nvidia.com/v1)';
-if (!NIM_API_BASE.startsWith('http://') && !NIM_API_BASE.startsWith('https://')) {
-  NIM_API_BASE = 'https://' + NIM_API_BASE;
+// 🔥 THE ULTIMATE SANITIZER: Automatically cleans and repairs broken or messy Env Variables
+let rawBase = (process.env.NIM_API_BASE || '').trim();
+if (!rawBase || rawBase === 'undefined' || rawBase === 'null' || rawBase.length < 5) {
+  rawBase = 'https://integrate.api.nvidia.com/v1';
 }
-NIM_API_BASE = NIM_API_BASE.replace(/\/+$/, '');
+// Strip out any accidental single or double quotes
+rawBase = rawBase.replace(/['"]/g, '');
+// Strip off trailing `/chat/completions` if the user accidentally pasted the entire route
+rawBase = rawBase.replace(/\/chat\/completions\/?$/, '');
+// Ensure secure protocol prefix is present
+if (!rawBase.startsWith('http://') && !rawBase.startsWith('https://')) {
+  rawBase = 'https://' + rawBase;
+}
+// Clean up any double slashes at the end
+rawBase = rawBase.replace(/\/+$/, '');
+const NIM_API_BASE = rawBase;
 
-const NIM_API_KEY = process.env.NIM_API_KEY;
+// Sanitize API Key to remove potential white spaces or accidental quotes
+let rawKey = (process.env.NIM_API_KEY || '').trim();
+const NIM_API_KEY = rawKey.replace(/['"]/g, '');
+
 const SHOW_REASONING = true; 
 
 // Model mapping
