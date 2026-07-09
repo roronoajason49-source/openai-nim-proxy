@@ -14,24 +14,19 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 // Dynamic string constructor to prevent mobile app rendering glitches
 const b3 = String.fromCharCode(96, 96, 96);
 
-// 🔥 THE ULTIMATE SANITIZER: Automatically cleans and repairs broken or messy Env Variables
+// Automatically cleans and repairs broken or messy Env Variables
 let rawBase = (process.env.NIM_API_BASE || '').trim();
 if (!rawBase || rawBase === 'undefined' || rawBase === 'null' || rawBase.length < 5) {
   rawBase = 'https://integrate.api.nvidia.com/v1';
 }
-// Strip out any accidental single or double quotes
 rawBase = rawBase.replace(/['"]/g, '');
-// Strip off trailing `/chat/completions` if the user accidentally pasted the entire route
 rawBase = rawBase.replace(/\/chat\/completions\/?$/, '');
-// Ensure secure protocol prefix is present
 if (!rawBase.startsWith('http://') && !rawBase.startsWith('https://')) {
   rawBase = 'https://' + rawBase;
 }
-// Clean up any double slashes at the end
 rawBase = rawBase.replace(/\/+$/, '');
 const NIM_API_BASE = rawBase;
 
-// Sanitize API Key to remove potential white spaces or accidental quotes
 let rawKey = (process.env.NIM_API_KEY || '').trim();
 const NIM_API_KEY = rawKey.replace(/['"]/g, '');
 
@@ -116,7 +111,12 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (nimModel.includes('step-3.7')) {
       nimRequest.reasoning_effort = "high";
     } else if (nimModel.includes('glm-5.2')) {
-      nimRequest.reasoning_effort = "high"; 
+      // 🔥 THE FIX: Override GLM-5.2 to absolute maximum reasoning depth & force thinking
+      nimRequest.reasoning_effort = "max"; 
+      nimRequest.chat_template_kwargs = { 
+        enable_thinking: true, 
+        reasoning_effort: "max" 
+      };
     } else if (nimModel.includes('minimax')) {
       nimRequest.reasoning_effort = "high";
       nimRequest.thinking = { type: "enabled" }; 
@@ -175,7 +175,15 @@ app.post('/v1/chat/completions', async (req, res) => {
                 let reasoning = delta.reasoning_content || delta.reasoning || '';
                 let content = delta.content || '';
                 
-                content = content.replace(/<think>/g, b3 + 'thought\n').replace(/<\/think>/g, '\n' + b3 + '\n\n');
+                // Track standard inline thought tags
+                if (content.includes('<think>')) {
+                  content = content.replace(/<think>/g, b3 + 'thought\n');
+                  reasoningStarted = true;
+                }
+                if (content.includes('</think>')) {
+                  content = content.replace(/<\/think>/g, '\n' + b3 + '\n\n');
+                  reasoningStarted = false;
+                }
                 
                 if (SHOW_REASONING) {
                   let combinedContent = '';
@@ -186,10 +194,9 @@ app.post('/v1/chat/completions', async (req, res) => {
                       reasoningStarted = true;
                     }
                     combinedContent += reasoning;
-                  }
-                  
-                  if (content) {
-                    if (reasoningStarted && content.trim() !== '') {
+                  } else if (content) {
+                    // 🔥 THE FIX: Transition out of thinking mode only when REAL dialogue text arrives
+                    if (reasoningStarted) {
                       combinedContent += '\n' + b3 + '\n\n';
                       reasoningStarted = false;
                     }
