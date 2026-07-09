@@ -11,9 +11,6 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Dynamic string constructor to prevent mobile app rendering glitches
-const b3 = String.fromCharCode(96, 96, 96);
-
 // Automatically cleans and repairs broken or messy Env Variables
 let rawBase = (process.env.NIM_API_BASE || '').trim();
 if (!rawBase || rawBase === 'undefined' || rawBase === 'null' || rawBase.length < 5) {
@@ -158,7 +155,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                   object: 'chat.completion.chunk',
                   created: Math.floor(Date.now() / 1000),
                   model: nimModel,
-                  choices: [{ index: 0, delta: { content: '\n' + b3 + '\n\n' }, finish_reason: 'stop' }]
+                  choices: [{ index: 0, delta: { content: '\n</think>\n\n' }, finish_reason: 'stop' }]
                 };
                 res.write(`data: ${JSON.stringify(closeChunk)}\n\n`);
                 reasoningStarted = false;
@@ -178,22 +175,22 @@ app.post('/v1/chat/completions', async (req, res) => {
                 if (SHOW_REASONING) {
                   let combinedContent = '';
                   
-                  // Scenario 1: Dedicated Reasoning Channel is active
+                  // Scenario 1: Dedicated Reasoning Channel (e.g., DeepSeek / GLM reasoning field)
                   if (reasoning) {
                     usesChannelReasoning = true;
                     if (!reasoningStarted) {
-                      combinedContent += b3 + 'thought\n';
+                      combinedContent += '<think>\n';
                       reasoningStarted = true;
                     }
                     combinedContent += reasoning;
                   }
                   
-                  // Scenario 2: Main Content Channel is streaming
+                  // Scenario 2: Main Content Channel (e.g., models outputting <think> inline)
                   if (content) {
                     if (content.includes('<think>')) {
-                      usesChannelReasoning = false; // Model is using raw tag markers in content stream
+                      usesChannelReasoning = false; 
                       if (!reasoningStarted) {
-                        combinedContent += b3 + 'thought\n';
+                        combinedContent += '<think>\n';
                         reasoningStarted = true;
                       }
                       content = content.replace(/<think>/g, '');
@@ -204,15 +201,15 @@ app.post('/v1/chat/completions', async (req, res) => {
                       content = content.replace(/<\/think>/g, '');
                     }
                     
-                    // Handle dynamic state boundaries
+                    // Handle transition boundaries
                     if (reasoningStarted) {
                       if (usesChannelReasoning && !reasoning) {
-                        // In Dedicated Mode, close the box the instant a dialogue token is received
-                        combinedContent += '\n' + b3 + '\n\n';
+                        // Close the tag immediately when dialogue content starts
+                        combinedContent += '\n</think>\n\n';
                         reasoningStarted = false;
                       } else if (!usesChannelReasoning && hasEndTag) {
-                        // In Tag Mode, only close the box if the model sends its final </think> tag
-                        combinedContent += '\n' + b3 + '\n\n';
+                        // Close tag only when model sends native closing tag
+                        combinedContent += '\n</think>\n\n';
                         reasoningStarted = false;
                       }
                     }
@@ -258,6 +255,39 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
     if (req.body && req.body.stream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      
+      let chatMessage = `\n\n*[System Error ${statusCode}: NVIDIA rejected the request.*\n\n**REASON:**\n\`${exactMessage}\`]*`;
+
+      const errorChunk = {
+        id: `error-${Date.now()}`,
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model: req.body.model || 'proxy-error',
+        choices: [{ index: 0, delta: { content: chatMessage }, finish_reason: 'stop' }]
+      };
+      
+      res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    } else {
+      res.status(statusCode).json({
+        error: { message: exactMessage, type: 'proxy_error', code: statusCode }
+      });
+    }
+  }
+});
+
+app.all('*', (req, res) => {
+  res.status(404).json({ error: { message: `Endpoint not found`, type: 'invalid_request_error', code: 404 } });
+});
+
+app.listen(PORT, () => {
+  console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
+}); && req.body.stream) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
