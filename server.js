@@ -11,8 +11,11 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
+// Dynamic string constructor to prevent mobile app rendering glitches
+const b3 = String.fromCharCode(96, 96, 96);
+
 // Auto-fix API URL layouts
-let NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
+let NIM_API_BASE = process.env.NIM_API_BASE || '[https://integrate.api.nvidia.com/v1](https://integrate.api.nvidia.com/v1)';
 if (!NIM_API_BASE.startsWith('http://') && !NIM_API_BASE.startsWith('https://')) {
   NIM_API_BASE = 'https://' + NIM_API_BASE;
 }
@@ -142,5 +145,112 @@ app.post('/v1/chat/completions', async (req, res) => {
                   object: 'chat.completion.chunk',
                   created: Math.floor(Date.now() / 1000),
                   model: nimModel,
-                  choices: [{ index: 0, delta: { content: '\n
-http://googleusercontent.com/immersive_entry_chip/0
+                  choices: [{ index: 0, delta: { content: '\n' + b3 + '\n\n' }, finish_reason: 'stop' }]
+                };
+                res.write(`data: ${JSON.stringify(closeChunk)}\n\n`);
+                reasoningStarted = false;
+              }
+              res.write('data: [DONE]\n\n'); 
+              return;
+            }
+            
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (data.choices?.[0]?.delta) {
+                const delta = data.choices[0].delta;
+                
+                let reasoning = delta.reasoning_content || delta.reasoning || '';
+                let content = delta.content || '';
+                
+                content = content.replace(/<think>/g, b3 + 'thought\n').replace(/<\/think>/g, '\n' + b3 + '\n\n');
+                
+                if (SHOW_REASONING) {
+                  let combinedContent = '';
+                  
+                  if (reasoning) {
+                    if (!reasoningStarted) {
+                      combinedContent += b3 + 'thought\n';
+                      reasoningStarted = true;
+                    }
+                    combinedContent += reasoning;
+                  }
+                  
+                  if (content) {
+                    if (reasoningStarted && content.trim() !== '') {
+                      combinedContent += '\n' + b3 + '\n\n';
+                      reasoningStarted = false;
+                    }
+                    combinedContent += content;
+                  }
+                  
+                  data.choices[0].delta.content = combinedContent;
+                } else {
+                  data.choices[0].delta.content = content.replace(/<think>/g, '').replace(/<\/think>/g, '');
+                }
+                
+                delete data.choices[0].delta.reasoning_content;
+                delete data.choices[0].delta.reasoning;
+              }
+              res.write(`data: ${JSON.stringify(data)}\n\n`);
+            } catch (e) {
+              res.write(line + '\n\n');
+            }
+          }
+        }
+      });
+      
+      response.data.on('end', () => res.end());
+      response.data.on('error', (err) => {
+        console.error('Stream processing interruption:', err);
+        res.end();
+      });
+    } else {
+      res.json({}); 
+    }
+    
+  } catch (error) {
+    const statusCode = error.response?.status || 500;
+    let exactMessage = error.message;
+
+    if (error.response?.data) {
+      if (typeof error.response.data === 'object') {
+        exactMessage = JSON.stringify(error.response.data);
+      } else {
+        exactMessage = error.response.data;
+      }
+    }
+
+    if (req.body && req.body.stream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      
+      let chatMessage = `\n\n*[System Error ${statusCode}: NVIDIA rejected the request.*\n\n**REASON:**\n\`${exactMessage}\`]*`;
+
+      const errorChunk = {
+        id: `error-${Date.now()}`,
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model: req.body.model || 'proxy-error',
+        choices: [{ index: 0, delta: { content: chatMessage }, finish_reason: 'stop' }]
+      };
+      
+      res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    } else {
+      res.status(statusCode).json({
+        error: { message: exactMessage, type: 'proxy_error', code: statusCode }
+      });
+    }
+  }
+});
+
+app.all('*', (req, res) => {
+  res.status(404).json({ error: { message: `Endpoint not found`, type: 'invalid_request_error', code: 404 } });
+});
+
+app.listen(PORT, () => {
+  console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
+});
