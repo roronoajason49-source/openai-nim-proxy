@@ -56,8 +56,8 @@ app.post('/v1/chat/completions', async (req, res) => {
     const normalizedMessages = [];
     let isFirstSystem = true;
 
-    // 🔥 THE FIX: Stop the AI from writing roleplay dialogue inside the thought block
-    const ANTI_LEAK_PROMPT = "\n\n[SYSTEM DIRECTIVE: You are equipped with a reasoning/thinking phase. You MUST use this thinking phase ONLY for inner logic, planning your actions, and analyzing the context. DO NOT write the actual character dialogue, actions, or roleplay response inside the thinking phase. Your actual roleplay response must be generated strictly AFTER the thinking phase finishes.]";
+    // Forces reasoning to trigger and keeps character dialogue outside the thought block
+    const FORCE_THINKING_PROMPT = "\n\n[CRITICAL SYSTEM DIRECTIVE: You are an advanced reasoning model. You MUST ALWAYS start every single response by thinking. Wrap your internal thoughts, character logic, and planning strictly inside <think> and </think> tags. NEVER skip the <think> phase, even for short responses. NEVER put actual roleplay dialogue inside the <think> tags. Write your actual roleplay response only AFTER closing the </think> tag.]";
 
     for (const msg of messages) {
       if (!msg.content || typeof msg.content !== 'string' || msg.content.trim() === '') continue;
@@ -66,8 +66,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       
       if (role === 'system') {
         if (isFirstSystem && normalizedMessages.length === 0) {
-          // Anchor the core character card and secretly inject the Anti-Leak instruction
-          normalizedMessages.push({ role: 'system', content: msg.content + ANTI_LEAK_PROMPT });
+          normalizedMessages.push({ role: 'system', content: msg.content + FORCE_THINKING_PROMPT });
           isFirstSystem = false;
           continue;
         } else {
@@ -97,14 +96,14 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: stream || false
     };
     
-    // 🔥 THE FIX 2: Completely separate the hardware payload triggers so they don't break each other
+    // Set proper API hardware keys for each model family
     if (nimModel.includes('step-3.7')) {
       nimRequest.reasoning_effort = "high";
     } else if (nimModel.includes('glm-5.2')) {
-      nimRequest.reasoning_effort = "high"; // GLM hates the thinking object, so we ONLY pass this
+      nimRequest.reasoning_effort = "high"; 
     } else if (nimModel.includes('minimax')) {
       nimRequest.reasoning_effort = "high";
-      nimRequest.thinking = { type: "enabled" }; // MiniMax requires the object
+      nimRequest.thinking = { type: "enabled" }; 
     } else if (nimModel.includes('deepseek-v4')) {
       nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
     }
@@ -123,10 +122,13 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('Connection', 'keep-alive');
       res.setHeader('X-Accel-Buffering', 'no'); 
       
+      let buffer = '';
       let reasoningStarted = false;
       
       response.data.on('data', (chunk) => {
-        const lines = chunk.toString().split('\n');
+        buffer += chunk.toString();
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
         
         lines.forEach(line => {
           line = line.trim();
@@ -134,7 +136,6 @@ app.post('/v1/chat/completions', async (req, res) => {
           
           if (line.startsWith('data: ')) {
             if (line.includes('[DONE]')) {
-              // Safety catch: Close the markdown box if the API suddenly disconnects
               if (reasoningStarted) {
                 const closeChunk = {
                   id: `chatcmpl-${Date.now()}`,
@@ -142,6 +143,3 @@ app.post('/v1/chat/completions', async (req, res) => {
                   created: Math.floor(Date.now() / 1000),
                   model: nimModel,
                   choices: [{ index: 0, delta: { content: '\n
-http://googleusercontent.com/immersive_entry_chip/0
-
-Push this to GitHub and let it build. GLM-5.2 will instantly have its reasoning abilities restored, and because of the secret Anti-Leak prompt, it will safely keep its thoughts separated from its roleplay dialogue!
