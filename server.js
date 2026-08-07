@@ -36,13 +36,18 @@ const MODEL_MAPPING = {
   'glm-5.2': 'z-ai/glm-5.2',
   'z-ai/glm-5.2': 'z-ai/glm-5.2',
   'minimax-m3': 'minimaxai/minimax-m3',
+  'minimax-3': 'minimaxai/minimax-m3',
   'minimaxai/minimax-m3': 'minimaxai/minimax-m3',
   'minimax-m2.7': 'minimaxai/minimax-m2.7',
   'qwen-122b': 'qwen/qwen3.5-122b-a10b',         
   'deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
   'z-ai/glm-5.1': 'z-ai/glm-5.2', 
-  'glm-5.1': 'z-ai/glm-5.2'
+  'glm-5.1': 'z-ai/glm-5.2',
+  'kimi-k2.6': 'moonshotai/kimi-k2.6',
+  'moonshotai/kimi-k2.6': 'moonshotai/kimi-k2.6',
+  'kimi-k2.5': 'moonshotai/kimi-k2.5-turbo',
+  'moonshotai/kimi-k2.5-turbo': 'moonshotai/kimi-k2.5-turbo'
 };
 
 app.get('/health', (req, res) => {
@@ -108,16 +113,14 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (nimModel.includes('step-3.7')) {
       nimRequest.reasoning_effort = "high";
     } else if (nimModel.includes('glm-5.2')) {
-      nimRequest.reasoning_effort = "max"; 
-      nimRequest.chat_template_kwargs = { 
-        enable_thinking: true, 
-        reasoning_effort: "max" 
-      };
+      nimRequest.reasoning_effort = "high"; 
     } else if (nimModel.includes('minimax')) {
       nimRequest.reasoning_effort = "high";
       nimRequest.thinking = { type: "enabled" }; 
     } else if (nimModel.includes('deepseek-v4')) {
       nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
+    } else if (nimModel.includes('kimi')) {
+      nimRequest.reasoning_effort = "high";
     }
     
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
@@ -175,7 +178,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                 if (SHOW_REASONING) {
                   let combinedContent = '';
                   
-                  // Scenario 1: Dedicated Reasoning Channel (e.g., DeepSeek / GLM reasoning field)
+                  // Scenario 1: Dedicated Reasoning Channel
                   if (reasoning) {
                     usesChannelReasoning = true;
                     if (!reasoningStarted) {
@@ -204,11 +207,9 @@ app.post('/v1/chat/completions', async (req, res) => {
                     // Handle transition boundaries
                     if (reasoningStarted) {
                       if (usesChannelReasoning && !reasoning) {
-                        // Close the tag immediately when dialogue content starts
                         combinedContent += '\n</think>\n\n';
                         reasoningStarted = false;
                       } else if (!usesChannelReasoning && hasEndTag) {
-                        // Close tag only when model sends native closing tag
                         combinedContent += '\n</think>\n\n';
                         reasoningStarted = false;
                       }
@@ -252,6 +253,73 @@ app.post('/v1/chat/completions', async (req, res) => {
           if (SHOW_REASONING) {
             if (reasoning) {
               fullContent = '<think>\n' + reasoning.trim() + '\n</think>\n\n' + fullContent;
+            } else if (fullContent.includes('<think>')) {
+              if (!fullContent.includes('</think>')) {
+                fullContent = fullContent.replace(/<think>/g, '<think>\n') + '\n</think>';
+              }
+            }
+          } else {
+            fullContent = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+          }
+
+          return {
+            index: choice.index,
+            message: { role: choice.message.role, content: fullContent },
+            finish_reason: choice.finish_reason || 'stop'
+          };
+        }),
+        usage: response.data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+      };
+      res.json(openaiResponse); 
+    }
+    
+  } catch (error) {
+    const statusCode = error.response?.status || 500;
+    let exactMessage = error.message;
+
+    if (error.response?.data) {
+      if (typeof error.response.data === 'object') {
+        exactMessage = JSON.stringify(error.response.data);
+      } else {
+        exactMessage = error.response.data;
+      }
+    }
+
+    if (req.body && req.body.stream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      
+      let chatMessage = `\n\n*[System Error ${statusCode}: NVIDIA rejected the request.*\n\n**REASON:**\n\`${exactMessage}\`]*`;
+
+      const errorChunk = {
+        id: `error-${Date.now()}`,
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model: req.body.model || 'proxy-error',
+        choices: [{ index: 0, delta: { content: chatMessage }, finish_reason: 'stop' }]
+      };
+      
+      res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    } else {
+      res.status(statusCode).json({
+        error: { message: exactMessage, type: 'proxy_error', code: statusCode }
+      });
+    }
+  }
+});
+
+app.all('*', (req, res) => {
+  res.status(404).json({ error: { message: `Endpoint not found`, type: 'invalid_request_error', code: 404 } });
+});
+
+app.listen(PORT, () => {
+  console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
+});
+'\n</think>\n\n' + fullContent;
             } else if (fullContent.includes('<think>')) {
               if (!fullContent.includes('</think>')) {
                 fullContent = fullContent.replace(/<think>/g, '<think>\n') + '\n</think>';
