@@ -126,7 +126,7 @@
           'Content-Type': 'application/json'
         },
         responseType: stream ? 'stream' : 'json',
-        timeout: 60000
+        timeout: 180000 // Extended to 3 minutes (180,000ms) for high-context GLM requests
       });
       
       if (stream) {
