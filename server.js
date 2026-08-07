@@ -1,4 +1,17 @@
-// server.js - OpenAI to NVIDIA NIM API Proxy (Universal ESM/CJS Compatible)
+// server.js - OpenAI to NVIDIA NIM API Proxy
+(async () => {
+  const expressModule = await import('express');
+  const express = expressModule.default || expressModule;
+  const corsModule = await import('cors');
+  const cors = corsModule.default || corsModule;
+  const axiosModule = await import('axios');
+  const axios = axiosModule.default || axiosModule;
+
+  const app = express();
+  const PORT = process.env.PORT || 3000;
+
+  // Middleware
+  app.use(cors());// server.js - OpenAI to NVIDIA NIM API Proxy
 (async () => {
   const expressModule = await import('express');
   const express = expressModule.default || expressModule;
@@ -15,7 +28,7 @@
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-  // Automatically cleans and repairs environment variables
+  // Environment variable sanitization
   let rawBase = (process.env.NIM_API_BASE || '').trim();
   if (!rawBase || rawBase === 'undefined' || rawBase === 'null' || rawBase.length < 5) {
     rawBase = 'https://integrate.api.nvidia.com/v1';
@@ -107,10 +120,14 @@
         stream: stream || false
       };
       
+      // Target parameters per hardware vendor specification
       if (nimModel.includes('minimax')) {
         nimRequest.reasoning_effort = "high";
         nimRequest.thinking = { type: "enabled" }; 
-      } else if (nimModel.includes('step-3.7') || nimModel.includes('glm-5.2')) {
+      } else if (nimModel.includes('glm-5.2')) {
+        nimRequest.reasoning_effort = "high";
+        nimRequest.chat_template_kwargs = { enable_thinking: true };
+      } else if (nimModel.includes('step-3.7')) {
         nimRequest.reasoning_effort = "high";
       } else if (nimModel.includes('deepseek-v4')) {
         nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
@@ -248,6 +265,68 @@
                 fullContent = fullContent.replace(/<think>/g, '<think>\n') + '\n</think>';
               }
             } else {
+              fullContent = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+            }
+
+            return {
+              index: choice.index,
+              message: { role: choice.message.role, content: fullContent },
+              finish_reason: choice.finish_reason || 'stop'
+            };
+          }),
+          usage: response.data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+        };
+        res.json(openaiResponse); 
+      }
+      
+    } catch (error) {
+      const statusCode = error.response?.status || 500;
+      let exactMessage = error.message;
+
+      if (error.response?.data) {
+        if (typeof error.response.data === 'object') {
+          exactMessage = JSON.stringify(error.response.data);
+        } else {
+          exactMessage = error.response.data;
+        }
+      }
+
+      if (req.body && req.body.stream) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        
+        let chatMessage = `\n\n*[System Error ${statusCode}: NVIDIA rejected the request.*\n\n**REASON:**\n\`${exactMessage}\`]*`;
+
+        const errorChunk = {
+          id: `error-${Date.now()}`,
+          object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000),
+          model: req.body.model || 'proxy-error',
+          choices: [{ index: 0, delta: { content: chatMessage }, finish_reason: 'stop' }]
+        };
+        
+        res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
+        res.write('data: [DONE]\n\n');
+        return res.end();
+      } else {
+        res.status(statusCode).json({
+          error: { message: exactMessage, type: 'proxy_error', code: statusCode }
+        });
+      }
+    }
+  });
+
+  app.all('*', (req, res) => {
+    res.status(404).json({ error: { message: `Endpoint not found`, type: 'invalid_request_error', code: 404 } });
+  });
+
+  app.listen(PORT, () => {
+    console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
+  });
+})();
+      } else {
               fullContent = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
             }
 
