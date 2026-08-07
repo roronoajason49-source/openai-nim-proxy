@@ -11,7 +11,7 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Sanitizes base URL and API keys
+// Automatically cleans and repairs broken or messy Env Variables
 let rawBase = (process.env.NIM_API_BASE || '').trim();
 if (!rawBase || rawBase === 'undefined' || rawBase === 'null' || rawBase.length < 5) {
   rawBase = 'https://integrate.api.nvidia.com/v1';
@@ -29,25 +29,20 @@ const NIM_API_KEY = rawKey.replace(/['"]/g, '');
 
 const SHOW_REASONING = true; 
 
-// Model routing dictionary
+// Model mapping
 const MODEL_MAPPING = {
   'step-3.7-flash': 'stepfun-ai/step-3.7-flash',
   'stepfun-ai/step-3.7-flash': 'stepfun-ai/step-3.7-flash', 
   'glm-5.2': 'z-ai/glm-5.2',
   'z-ai/glm-5.2': 'z-ai/glm-5.2',
   'minimax-m3': 'minimaxai/minimax-m3',
-  'minimax-3': 'minimaxai/minimax-m3',
   'minimaxai/minimax-m3': 'minimaxai/minimax-m3',
   'minimax-m2.7': 'minimaxai/minimax-m2.7',
   'qwen-122b': 'qwen/qwen3.5-122b-a10b',         
   'deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
   'z-ai/glm-5.1': 'z-ai/glm-5.2', 
-  'glm-5.1': 'z-ai/glm-5.2',
-  'kimi-k2.6': 'moonshotai/kimi-k2.6',
-  'moonshotai/kimi-k2.6': 'moonshotai/kimi-k2.6',
-  'kimi-k2.5': 'moonshotai/kimi-k2.5-turbo',
-  'moonshotai/kimi-k2.5-turbo': 'moonshotai/kimi-k2.5-turbo'
+  'glm-5.1': 'z-ai/glm-5.2'
 };
 
 app.get('/health', (req, res) => {
@@ -69,29 +64,28 @@ app.post('/v1/chat/completions', async (req, res) => {
     const normalizedMessages = [];
     let isFirstSystem = true;
 
+    // Forces reasoning to trigger and keeps character dialogue outside the thought block
     const FORCE_THINKING_PROMPT = "\n\n[CRITICAL SYSTEM DIRECTIVE: You are an advanced reasoning model. You MUST ALWAYS start every single response by thinking. Wrap your internal thoughts, character logic, and planning strictly inside <think> and </think> tags. NEVER skip the <think> phase, even for short responses. NEVER put actual roleplay dialogue inside the <think> tags. Write your actual roleplay response only AFTER closing the </think> tag.]";
 
-    if (Array.isArray(messages)) {
-      for (const msg of messages) {
-        if (!msg.content || typeof msg.content !== 'string' || msg.content.trim() === '') continue;
-        
-        let role = msg.role.toLowerCase();
-        
-        if (role === 'system') {
-          if (isFirstSystem && normalizedMessages.length === 0) {
-            normalizedMessages.push({ role: 'system', content: msg.content + FORCE_THINKING_PROMPT });
-            isFirstSystem = false;
-            continue;
-          } else {
-            role = 'user';
-          }
-        }
-        
-        if (normalizedMessages.length > 0 && normalizedMessages[normalizedMessages.length - 1].role === role) {
-          normalizedMessages[normalizedMessages.length - 1].content += '\n\n' + msg.content;
+    for (const msg of messages) {
+      if (!msg.content || typeof msg.content !== 'string' || msg.content.trim() === '') continue;
+      
+      let role = msg.role.toLowerCase();
+      
+      if (role === 'system') {
+        if (isFirstSystem && normalizedMessages.length === 0) {
+          normalizedMessages.push({ role: 'system', content: msg.content + FORCE_THINKING_PROMPT });
+          isFirstSystem = false;
+          continue;
         } else {
-          normalizedMessages.push({ role, content: msg.content });
+          role = 'user';
         }
+      }
+      
+      if (normalizedMessages.length > 0 && normalizedMessages[normalizedMessages.length - 1].role === role) {
+        normalizedMessages[normalizedMessages.length - 1].content += '\n\n' + msg.content;
+      } else {
+        normalizedMessages.push({ role, content: msg.content });
       }
     }
     
@@ -110,18 +104,20 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: stream || false
     };
     
-    // Hardware reasoning flags per model family
+    // Set proper API hardware keys for each model family
     if (nimModel.includes('step-3.7')) {
       nimRequest.reasoning_effort = "high";
     } else if (nimModel.includes('glm-5.2')) {
-      nimRequest.reasoning_effort = "high"; 
+      nimRequest.reasoning_effort = "max"; 
+      nimRequest.chat_template_kwargs = { 
+        enable_thinking: true, 
+        reasoning_effort: "max" 
+      };
     } else if (nimModel.includes('minimax')) {
       nimRequest.reasoning_effort = "high";
       nimRequest.thinking = { type: "enabled" }; 
     } else if (nimModel.includes('deepseek-v4')) {
       nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
-    } else if (nimModel.includes('kimi')) {
-      nimRequest.reasoning_effort = "high";
     }
     
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
@@ -179,6 +175,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                 if (SHOW_REASONING) {
                   let combinedContent = '';
                   
+                  // Scenario 1: Dedicated Reasoning Channel (e.g., DeepSeek / GLM reasoning field)
                   if (reasoning) {
                     usesChannelReasoning = true;
                     if (!reasoningStarted) {
@@ -188,6 +185,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                     combinedContent += reasoning;
                   }
                   
+                  // Scenario 2: Main Content Channel (e.g., models outputting <think> inline)
                   if (content) {
                     if (content.includes('<think>')) {
                       usesChannelReasoning = false; 
@@ -203,11 +201,14 @@ app.post('/v1/chat/completions', async (req, res) => {
                       content = content.replace(/<\/think>/g, '');
                     }
                     
+                    // Handle transition boundaries
                     if (reasoningStarted) {
                       if (usesChannelReasoning && !reasoning) {
+                        // Close the tag immediately when dialogue content starts
                         combinedContent += '\n</think>\n\n';
                         reasoningStarted = false;
                       } else if (!usesChannelReasoning && hasEndTag) {
+                        // Close tag only when model sends native closing tag
                         combinedContent += '\n</think>\n\n';
                         reasoningStarted = false;
                       }
@@ -238,6 +239,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         res.end();
       });
     } else {
+      // Robust Non-Stream Response Handler
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
@@ -256,6 +258,68 @@ app.post('/v1/chat/completions', async (req, res) => {
               }
             }
           } else {
+            fullContent = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+          }
+
+          return {
+            index: choice.index,
+            message: { role: choice.message.role, content: fullContent },
+            finish_reason: choice.finish_reason || 'stop'
+          };
+        }),
+        usage: response.data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+      };
+      res.json(openaiResponse); 
+    }
+    
+  } catch (error) {
+    const statusCode = error.response?.status || 500;
+    let exactMessage = error.message;
+
+    if (error.response?.data) {
+      if (typeof error.response.data === 'object') {
+        exactMessage = JSON.stringify(error.response.data);
+      } else {
+        exactMessage = error.response.data;
+      }
+    }
+
+    if (req.body && req.body.stream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      
+      let chatMessage = `\n\n*[System Error ${statusCode}: NVIDIA rejected the request.*\n\n**REASON:**\n\`${exactMessage}\`]*`;
+
+      const errorChunk = {
+        id: `error-${Date.now()}`,
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model: req.body.model || 'proxy-error',
+        choices: [{ index: 0, delta: { content: chatMessage }, finish_reason: 'stop' }]
+      };
+      
+      res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    } else {
+      res.status(statusCode).json({
+        error: { message: exactMessage, type: 'proxy_error', code: statusCode }
+      });
+    }
+  }
+});
+
+app.all('*', (req, res) => {
+  res.status(404).json({ error: { message: `Endpoint not found`, type: 'invalid_request_error', code: 404 } });
+});
+
+app.listen(PORT, () => {
+  console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
+});
+
+Add kimi model available in Nvidia nimse {
             fullContent = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
           }
 
