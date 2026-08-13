@@ -1,4 +1,4 @@
-// server.js - OpenAI to NVIDIA NIM API Proxy with Early SSE Header Flushing
+// server.js - OpenAI to NVIDIA NIM API Proxy
 (async () => {
   const expressModule = await import('express');
   const express = expressModule.default || expressModule;
@@ -106,24 +106,20 @@
         temperature: safe_temp,
         top_p: req.body.top_p ?? 1.0,
         max_tokens: 4096, 
-        stream: streamMode
+        stream: streamMode,
+        reasoning_effort: "high"
       };
-      
-      // Force maximum reasoning capacity across supported models
-      nimRequest.reasoning_effort = "high";
 
+      // Clean payload formatting per model vendor specifications
       if (nimModel.includes('minimax')) {
         nimRequest.thinking = { type: "enabled" }; 
       } else if (nimModel.includes('glm-5.2')) {
-        nimRequest.chat_template_kwargs = { enable_thinking: true, reasoning_effort: "high" };
+        nimRequest.chat_template_kwargs = { enable_thinking: true };
       } else if (nimModel.includes('deepseek-v4')) {
-        nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true, reasoning_effort: "high" };
-      } else {
-        nimRequest.thinking = { type: "enabled" };
-        nimRequest.chat_template_kwargs = { enable_thinking: true, reasoning_effort: "high" };
+        nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
       }
       
-      // 🔥 CRITICAL FIX FOR RENDER: Flush headers BEFORE calling Axios so Render never drops the socket
+      // Flush headers AND an initial empty payload packet immediately to satisfy JanitorAI
       if (streamMode) {
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
@@ -132,6 +128,15 @@
         if (typeof res.flushHeaders === 'function') {
           res.flushHeaders();
         }
+
+        const initChunk = {
+          id: `chatcmpl-${Date.now()}`,
+          object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000),
+          model: nimModel,
+          choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }]
+        };
+        res.write(`data: ${JSON.stringify(initChunk)}\n\n`);
       }
 
       const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
@@ -140,7 +145,7 @@
           'Content-Type': 'application/json'
         },
         responseType: streamMode ? 'stream' : 'json',
-        timeout: 180000 // 3-minute network window for long GLM-5.2 thinking traces
+        timeout: 180000
       });
       
       if (streamMode) {
