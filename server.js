@@ -1,4 +1,4 @@
-// server.js - OpenAI to NVIDIA NIM API Proxy
+// server.js - OpenAI to NVIDIA NIM API Proxy with SSE Heartbeat Ping
 (async () => {
   const expressModule = await import('express');
   const express = expressModule.default || expressModule;
@@ -60,6 +60,12 @@
 
   app.post('/v1/chat/completions', async (req, res) => {
     const streamMode = req.body?.stream || false;
+    let heartbeat = null;
+
+    // Safety cleanup on client disconnect
+    req.on('close', () => {
+      if (heartbeat) clearInterval(heartbeat);
+    });
 
     try {
       const { model, messages, temperature } = req.body;
@@ -110,7 +116,6 @@
         reasoning_effort: "high"
       };
 
-      // Clean payload formatting per model vendor specifications
       if (nimModel.includes('minimax')) {
         nimRequest.thinking = { type: "enabled" }; 
       } else if (nimModel.includes('glm-5.2')) {
@@ -119,7 +124,7 @@
         nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
       }
       
-      // Flush headers AND an initial empty payload packet immediately to satisfy JanitorAI
+      // 🔥 HEARTBEAT ENGINE: Stream headers + ping chunks every 2.5s to stop Render timeouts
       if (streamMode) {
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
@@ -137,6 +142,13 @@
           choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }]
         };
         res.write(`data: ${JSON.stringify(initChunk)}\n\n`);
+
+        // Send dummy comments every 2.5 seconds until NVIDIA starts returning tokens
+        heartbeat = setInterval(() => {
+          if (!res.writableEnded) {
+            res.write(': ping\n\n');
+          }
+        }, 2500);
       }
 
       const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
@@ -147,6 +159,12 @@
         responseType: streamMode ? 'stream' : 'json',
         timeout: 180000
       });
+
+      // Stop heartbeat once NVIDIA connection is established
+      if (heartbeat) {
+        clearInterval(heartbeat);
+        heartbeat = null;
+      }
       
       if (streamMode) {
         let buffer = '';
@@ -281,6 +299,11 @@
       }
       
     } catch (error) {
+      if (heartbeat) {
+        clearInterval(heartbeat);
+        heartbeat = null;
+      }
+
       const statusCode = error.response?.status || 500;
       let exactMessage = error.message;
 
