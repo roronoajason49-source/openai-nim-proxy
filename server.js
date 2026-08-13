@@ -1,4 +1,4 @@
-// server.js - OpenAI to NVIDIA NIM API Proxy with SSE Heartbeat Ping
+// server.js - OpenAI to NVIDIA NIM API Proxy with Buffer-Busting SSE Heartbeat
 (async () => {
   const expressModule = await import('express');
   const express = expressModule.default || expressModule;
@@ -62,7 +62,6 @@
     const streamMode = req.body?.stream || false;
     let heartbeat = null;
 
-    // Safety cleanup on client disconnect
     req.on('close', () => {
       if (heartbeat) clearInterval(heartbeat);
     });
@@ -124,16 +123,21 @@
         nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
       }
       
-      // 🔥 HEARTBEAT ENGINE: Stream headers + ping chunks every 2.5s to stop Render timeouts
+      // 🔥 BUFFER-BUSTING SSE ENGINE
       if (streamMode) {
         res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
         res.setHeader('Connection', 'keep-alive');
         res.setHeader('X-Accel-Buffering', 'no');
         if (typeof res.flushHeaders === 'function') {
           res.flushHeaders();
         }
 
+        // 1. Instantly send 4KB of silent SSE comment padding to breach Render's Nginx buffer
+        const initialPadding = ': ' + ' '.repeat(4096) + '\n\n';
+        res.write(initialPadding);
+
+        // 2. Send open chunk structure to JanitorAI
         const initChunk = {
           id: `chatcmpl-${Date.now()}`,
           object: 'chat.completion.chunk',
@@ -143,12 +147,12 @@
         };
         res.write(`data: ${JSON.stringify(initChunk)}\n\n`);
 
-        // Send dummy comments every 2.5 seconds until NVIDIA starts returning tokens
+        // 3. Keep 1KB comment pings firing every 2s until NVIDIA starts outputting text
         heartbeat = setInterval(() => {
           if (!res.writableEnded) {
-            res.write(': ping\n\n');
+            res.write(': ' + ' '.repeat(1024) + '\n\n');
           }
-        }, 2500);
+        }, 2000);
       }
 
       const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
@@ -160,7 +164,6 @@
         timeout: 180000
       });
 
-      // Stop heartbeat once NVIDIA connection is established
       if (heartbeat) {
         clearInterval(heartbeat);
         heartbeat = null;
