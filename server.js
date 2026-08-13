@@ -1,4 +1,4 @@
-// server.js - OpenAI to NVIDIA NIM API Proxy
+// server.js - OpenAI to NVIDIA NIM API Proxy with Early SSE Header Flushing
 (async () => {
   const expressModule = await import('express');
   const express = expressModule.default || expressModule;
@@ -59,14 +59,16 @@
   });
 
   app.post('/v1/chat/completions', async (req, res) => {
+    const streamMode = req.body?.stream || false;
+
     try {
-      const { model, messages, temperature, stream } = req.body;
+      const { model, messages, temperature } = req.body;
       let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'minimaxai/minimax-m3';
       
       const normalizedMessages = [];
       let isFirstSystem = true;
 
-      const FORCE_THINKING_PROMPT = "\n\n[CRITICAL SYSTEM DIRECTIVE: You are an advanced reasoning model. You MUST ALWAYS start every single response by thinking. Wrap your internal thoughts, character logic, and planning strictly inside <think> and </think> tags. NEVER skip the <think> phase, even for short responses. NEVER put actual roleplay dialogue inside the <think> tags. Write your actual roleplay response only AFTER closing the </think> tag.]";
+      const FORCE_THINKING_PROMPT = "\n\n[CRITICAL SYSTEM DIRECTIVE: You are an advanced reasoning model operating at MAXIMUM thinking capacity. You MUST ALWAYS start every single response by thinking deeply and thoroughly. Wrap your internal thoughts, character logic, and planning strictly inside <think> and </think> tags. NEVER skip or abbreviate the <think> phase, even for short responses. NEVER put actual roleplay dialogue inside the <think> tags. Write your actual roleplay response only AFTER closing the </think> tag.]";
 
       if (Array.isArray(messages)) {
         for (const msg of messages) {
@@ -104,37 +106,44 @@
         temperature: safe_temp,
         top_p: req.body.top_p ?? 1.0,
         max_tokens: 4096, 
-        stream: stream || false
+        stream: streamMode
       };
       
-      // Target parameters per hardware vendor specification
+      // Force maximum reasoning capacity across supported models
+      nimRequest.reasoning_effort = "high";
+
       if (nimModel.includes('minimax')) {
-        nimRequest.reasoning_effort = "high";
         nimRequest.thinking = { type: "enabled" }; 
       } else if (nimModel.includes('glm-5.2')) {
-        nimRequest.reasoning_effort = "high";
-        nimRequest.chat_template_kwargs = { enable_thinking: true };
-      } else if (nimModel.includes('step-3.7')) {
-        nimRequest.reasoning_effort = "high";
+        nimRequest.chat_template_kwargs = { enable_thinking: true, reasoning_effort: "high" };
       } else if (nimModel.includes('deepseek-v4')) {
-        nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
+        nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true, reasoning_effort: "high" };
+      } else {
+        nimRequest.thinking = { type: "enabled" };
+        nimRequest.chat_template_kwargs = { enable_thinking: true, reasoning_effort: "high" };
       }
       
+      // 🔥 CRITICAL FIX FOR RENDER: Flush headers BEFORE calling Axios so Render never drops the socket
+      if (streamMode) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        if (typeof res.flushHeaders === 'function') {
+          res.flushHeaders();
+        }
+      }
+
       const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
         headers: {
           'Authorization': `Bearer ${NIM_API_KEY}`,
           'Content-Type': 'application/json'
         },
-        responseType: stream ? 'stream' : 'json',
-        timeout: 180000 // Extended to 3 minutes (180,000ms) for high-context GLM requests
+        responseType: streamMode ? 'stream' : 'json',
+        timeout: 180000 // 3-minute network window for long GLM-5.2 thinking traces
       });
       
-      if (stream) {
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
-        res.setHeader('X-Accel-Buffering', 'no'); 
-        
+      if (streamMode) {
         let buffer = '';
         let reasoningStarted = false;
         let usesChannelReasoning = false;
@@ -278,19 +287,14 @@
         }
       }
 
-      if (req.body && req.body.stream) {
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
-        res.setHeader('X-Accel-Buffering', 'no');
-        
+      if (streamMode) {
         let chatMessage = `\n\n*[System Error ${statusCode}: NVIDIA rejected the request.*\n\n**REASON:**\n\`${exactMessage}\`]*`;
 
         const errorChunk = {
           id: `error-${Date.now()}`,
           object: 'chat.completion.chunk',
           created: Math.floor(Date.now() / 1000),
-          model: req.body.model || 'proxy-error',
+          model: req.body?.model || 'proxy-error',
           choices: [{ index: 0, delta: { content: chatMessage }, finish_reason: 'stop' }]
         };
         
