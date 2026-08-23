@@ -1,4 +1,4 @@
-// server.js - OpenAI to NVIDIA NIM API Proxy with Inkling Integration
+// server.js - OpenAI to NVIDIA NIM API Proxy with Inkling & Kimi Integration
 (async () => {
   const expressModule = await import('express');
   const express = expressModule.default || expressModule;
@@ -33,6 +33,9 @@
 
   // Model mapping dictionary
   const MODEL_MAPPING = {
+    'kimi-k3': 'moonshotai/kimi-k3',
+    'moonshotai/kimi-k3': 'moonshotai/kimi-k3',
+    'kimi': 'moonshotai/kimi-k3',
     'inkling': 'thinkingmachines/inkling',
     'thinkingmachines/inkling': 'thinkingmachines/inkling',
     'minimax-m3': 'minimaxai/minimax-m3',
@@ -125,7 +128,10 @@
       };
 
       // Model-specific hardware reasoning switches
-      if (nimModel.includes('inkling')) {
+      if (nimModel.includes('kimi') || nimModel.includes('moonshot')) {
+        nimRequest.reasoning_effort = "high";
+        nimRequest.chat_template_kwargs = { enable_thinking: true };
+      } else if (nimModel.includes('inkling')) {
         nimRequest.reasoning_effort = "high";
         nimRequest.chat_template_kwargs = { enable_thinking: true };
       } else if (nimModel.includes('minimax')) {
@@ -364,3 +370,4 @@
     console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
   });
 })();
+                        
