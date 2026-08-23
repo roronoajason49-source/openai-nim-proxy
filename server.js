@@ -36,6 +36,7 @@
     'kimi-k3': 'moonshotai/kimi-k3',
     'moonshotai/kimi-k3': 'moonshotai/kimi-k3',
     'kimi': 'moonshotai/kimi-k3',
+    'kimi-k2.5': 'moonshotai/kimi-k2.5',
     'inkling': 'thinkingmachines/inkling',
     'thinkingmachines/inkling': 'thinkingmachines/inkling',
     'minimax-m3': 'minimaxai/minimax-m3',
@@ -56,7 +57,7 @@
     res.json({ 
       status: 'ok', 
       service: 'OpenAI to NVIDIA NIM Proxy', 
-      default_model: 'minimax-m3', 
+      default_model: 'moonshotai/kimi-k3', 
       reasoning_display: SHOW_REASONING 
     });
   });
@@ -81,12 +82,12 @@
 
     try {
       const { model, messages, temperature } = req.body;
-      let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'minimaxai/minimax-m3';
+      let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'moonshotai/kimi-k3';
       
       const normalizedMessages = [];
-      let isFirstSystem = true;
+      let systemFound = false;
 
-      const FORCE_THINKING_PROMPT = "\n\n[CRITICAL SYSTEM DIRECTIVE: You are an advanced reasoning model operating at MAXIMUM thinking capacity. You MUST ALWAYS start every single response by thinking deeply. Wrap your internal thoughts, character logic, and planning strictly inside <think> and </think> tags. NEVER skip the <think> phase, even for short responses. NEVER put actual roleplay dialogue inside the <think> tags. Write your actual roleplay response only AFTER closing the </think> tag.]";
+      const FORCE_THINKING_PROMPT = "\n\n[CRITICAL SYSTEM DIRECTIVE: You are an advanced reasoning model operating at MAXIMUM thinking capacity. You MUST ALWAYS start every response by thinking step-by-step before answering. Enclose your thoughts inside <think> and </think> tags. Never omit the thinking block.]";
 
       if (Array.isArray(messages)) {
         for (const msg of messages) {
@@ -95,9 +96,9 @@
           let role = msg.role.toLowerCase();
           
           if (role === 'system') {
-            if (isFirstSystem && normalizedMessages.length === 0) {
+            if (!systemFound) {
               normalizedMessages.push({ role: 'system', content: msg.content + FORCE_THINKING_PROMPT });
-              isFirstSystem = false;
+              systemFound = true;
               continue;
             } else {
               role = 'user';
@@ -111,7 +112,16 @@
           }
         }
       }
+
+      // If Janitor AI provided no system message, inject it at the beginning
+      if (!systemFound) {
+        normalizedMessages.unshift({
+          role: 'system',
+          content: 'You are a helpful assistant.' + FORCE_THINKING_PROMPT
+        });
+      }
       
+      // Ensure conversation doesn't start with assistant
       if (normalizedMessages.length > 1 && normalizedMessages[1].role === 'assistant') {
         normalizedMessages.splice(1, 0, { role: 'user', content: 'Hello.' });
       }
@@ -122,15 +132,16 @@
         model: nimModel,
         messages: normalizedMessages,
         temperature: safe_temp,
-        top_p: req.body.top_p ?? 1.0,
-        max_tokens: 4096, 
+        top_p: req.body.top_p ?? 0.95,
+        max_tokens: req.body.max_tokens ? Math.max(req.body.max_tokens, 8192) : 8192, 
         stream: streamMode
       };
 
       // Model-specific hardware reasoning switches
       if (nimModel.includes('kimi') || nimModel.includes('moonshot')) {
-        nimRequest.reasoning_effort = "high";
-        nimRequest.chat_template_kwargs = { enable_thinking: true };
+        nimRequest.reasoning_effort = "max";
+        nimRequest.thinking = { type: "enabled", budget_tokens: 4096 };
+        nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
       } else if (nimModel.includes('inkling')) {
         nimRequest.reasoning_effort = "high";
         nimRequest.chat_template_kwargs = { enable_thinking: true };
@@ -145,7 +156,7 @@
         nimRequest.reasoning_effort = "high";
       }
       
-      // Buffer-busting SSE headers and heartbeat
+      // SSE Headers
       if (streamMode) {
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -155,11 +166,9 @@
           res.flushHeaders();
         }
 
-        // 4KB initial comment to breach reverse-proxy buffers
         const initialPadding = ': ' + ' '.repeat(4096) + '\n\n';
         res.write(initialPadding);
 
-        // Open SSE chunk
         const initChunk = {
           id: `chatcmpl-${Date.now()}`,
           object: 'chat.completion.chunk',
@@ -169,7 +178,6 @@
         };
         res.write(`data: ${JSON.stringify(initChunk)}\n\n`);
 
-        // Padded heartbeats every 2 seconds during prefill
         heartbeat = setInterval(() => {
           if (!res.writableEnded) {
             res.write(': ' + ' '.repeat(1024) + '\n\n');
@@ -194,7 +202,7 @@
       if (streamMode) {
         let buffer = '';
         let reasoningStarted = false;
-        let usesChannelReasoning = false;
+        let inChannelReasoning = false;
         
         response.data.on('data', (chunk) => {
           buffer += chunk.toString();
@@ -226,54 +234,35 @@
                 const data = JSON.parse(line.slice(6));
                 if (data.choices?.[0]?.delta) {
                   const delta = data.choices[0].delta;
-                  
                   let reasoning = delta.reasoning_content || delta.reasoning || '';
                   let content = delta.content || '';
-                  const hasContentKey = 'content' in delta;
                   
                   if (SHOW_REASONING) {
-                    let combinedContent = '';
-                    
+                    let streamText = '';
+
+                    // 1. Handle Dedicated Reasoning Channel
                     if (reasoning) {
-                      usesChannelReasoning = true;
                       if (!reasoningStarted) {
-                        combinedContent += '<think>\n';
+                        streamText += '<think>\n';
                         reasoningStarted = true;
+                        inChannelReasoning = true;
                       }
-                      combinedContent += reasoning;
-                    }
+                      streamText += reasoning;
+                    } 
                     
-                    if (hasContentKey) {
-                      if (content.includes('<think>')) {
-                        usesChannelReasoning = false; 
-                        if (!reasoningStarted) {
-                          combinedContent += '<think>\n';
-                          reasoningStarted = true;
-                        }
-                        content = content.replace(/<think>/g, '');
+                    // 2. Handle Content Stream Transition
+                    if (content) {
+                      if (inChannelReasoning && reasoningStarted) {
+                        streamText += '\n</think>\n\n';
+                        reasoningStarted = false;
+                        inChannelReasoning = false;
                       }
-                      
-                      let hasEndTag = content.includes('</think>');
-                      if (hasEndTag) {
-                        content = content.replace(/<\/think>/g, '');
-                      }
-                      
-                      if (reasoningStarted) {
-                        if (usesChannelReasoning && !reasoning) {
-                          combinedContent += '\n</think>\n\n';
-                          reasoningStarted = false;
-                        } else if (!usesChannelReasoning && hasEndTag) {
-                          combinedContent += '\n</think>\n\n';
-                          reasoningStarted = false;
-                        }
-                      }
-                      
-                      combinedContent += content;
+                      streamText += content;
                     }
-                    
-                    data.choices[0].delta.content = combinedContent;
+
+                    data.choices[0].delta.content = streamText;
                   } else {
-                    data.choices[0].delta.content = content.replace(/<think>/g, '').replace(/<\/think>/g, '');
+                    data.choices[0].delta.content = content.replace(/<think>[\s\S]*?<\/think>/g, '');
                   }
                   
                   delete data.choices[0].delta.reasoning_content;
@@ -289,7 +278,7 @@
         
         response.data.on('end', () => res.end());
         response.data.on('error', (err) => {
-          console.error('Stream processing interruption:', err);
+          console.error('Stream processing error:', err);
           res.end();
         });
       } else {
@@ -305,8 +294,6 @@
             if (SHOW_REASONING) {
               if (reasoning) {
                 fullContent = '<think>\n' + reasoning.trim() + '\n</think>\n\n' + fullContent;
-              } else if (fullContent.includes('<think>') && !fullContent.includes('</think>')) {
-                fullContent = fullContent.replace(/<think>/g, '<think>\n') + '\n</think>';
               }
             } else {
               fullContent = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
@@ -333,16 +320,13 @@
       let exactMessage = error.message;
 
       if (error.response?.data) {
-        if (typeof error.response.data === 'object') {
-          exactMessage = JSON.stringify(error.response.data);
-        } else {
-          exactMessage = error.response.data;
-        }
+        exactMessage = typeof error.response.data === 'object' 
+          ? JSON.stringify(error.response.data) 
+          : error.response.data;
       }
 
       if (streamMode) {
-        let chatMessage = `\n\n*[System Error ${statusCode}: NVIDIA rejected the request.*\n\n**REASON:**\n\`${exactMessage}\`]*`;
-
+        let chatMessage = `\n\n*[Proxy Error ${statusCode}: NVIDIA NIM rejected request: ${exactMessage}]*`;
         const errorChunk = {
           id: `error-${Date.now()}`,
           object: 'chat.completion.chunk',
@@ -350,7 +334,6 @@
           model: req.body?.model || 'proxy-error',
           choices: [{ index: 0, delta: { content: chatMessage }, finish_reason: 'stop' }]
         };
-        
         res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
         res.write('data: [DONE]\n\n');
         return res.end();
@@ -370,4 +353,4 @@
     console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
   });
 })();
-                        
+                  
