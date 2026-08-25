@@ -1,4 +1,4 @@
-// server.js - OpenAI to NVIDIA NIM API Proxy with Inkling & Kimi Integration
+// server.js - OpenAI to NVIDIA NIM API Proxy with Inkling, Kimi & DeepSeek-v4 Integration
 (async () => {
   const expressModule = await import('express');
   const express = expressModule.default || expressModule;
@@ -33,10 +33,19 @@
 
   // Model mapping dictionary
   const MODEL_MAPPING = {
+    'deepseek-v4-flash-0731': 'deepseek-ai/deepseek-v4-flash-0731',
+    'deepseek-ai/deepseek-v4-flash-0731': 'deepseek-ai/deepseek-v4-flash-0731',
+    'deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash-0731',
+    'deepseek-ai/deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash-0731',
+    'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
     'kimi-k3': 'moonshotai/kimi-k3',
     'moonshotai/kimi-k3': 'moonshotai/kimi-k3',
     'kimi': 'moonshotai/kimi-k3',
+    'kimi-k2-thinking': 'moonshotai/kimi-k2-thinking',
+    'moonshotai/kimi-k2-thinking': 'moonshotai/kimi-k2-thinking',
     'kimi-k2.5': 'moonshotai/kimi-k2.5',
+    'moonshotai/kimi-k2.5': 'moonshotai/kimi-k2.5',
+    'kimi-k2.6': 'moonshotai/kimi-k2.6',
     'inkling': 'thinkingmachines/inkling',
     'thinkingmachines/inkling': 'thinkingmachines/inkling',
     'minimax-m3': 'minimaxai/minimax-m3',
@@ -47,8 +56,6 @@
     'glm-5.2': 'z-ai/glm-5.2',
     'z-ai/glm-5.2': 'z-ai/glm-5.2',
     'qwen-122b': 'qwen/qwen3.5-122b-a10b',         
-    'deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash',
-    'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
     'z-ai/glm-5.1': 'z-ai/glm-5.2',
     'glm-5.1': 'z-ai/glm-5.2'
   };
@@ -57,7 +64,7 @@
     res.json({ 
       status: 'ok', 
       service: 'OpenAI to NVIDIA NIM Proxy', 
-      default_model: 'moonshotai/kimi-k3', 
+      default_model: 'deepseek-ai/deepseek-v4-flash-0731', 
       reasoning_display: SHOW_REASONING 
     });
   });
@@ -82,12 +89,12 @@
 
     try {
       const { model, messages, temperature } = req.body;
-      let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'moonshotai/kimi-k3';
+      let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'deepseek-ai/deepseek-v4-flash-0731';
       
       const normalizedMessages = [];
       let systemFound = false;
 
-      const FORCE_THINKING_PROMPT = "\n\n[CRITICAL SYSTEM DIRECTIVE: You are an advanced reasoning model operating at MAXIMUM thinking capacity. You MUST ALWAYS start every response by thinking step-by-step before answering. Enclose your thoughts inside <think> and </think> tags. Never omit the thinking block.]";
+      const FORCE_THINKING_PROMPT = "\n\n[CRITICAL SYSTEM DIRECTIVE: You are an advanced reasoning model. You MUST always think step-by-step before answering. Write out your detailed internal thoughts and roleplay planning inside <think> and </think> tags. Never skip the <think> phase. Write your dialogue and actions only AFTER closing the </think> tag.]";
 
       if (Array.isArray(messages)) {
         for (const msg of messages) {
@@ -113,20 +120,19 @@
         }
       }
 
-      // If Janitor AI provided no system message, inject it at the beginning
       if (!systemFound) {
         normalizedMessages.unshift({
           role: 'system',
-          content: 'You are a helpful assistant.' + FORCE_THINKING_PROMPT
+          content: 'You are an expert AI assistant.' + FORCE_THINKING_PROMPT
         });
       }
       
-      // Ensure conversation doesn't start with assistant
       if (normalizedMessages.length > 1 && normalizedMessages[1].role === 'assistant') {
         normalizedMessages.splice(1, 0, { role: 'user', content: 'Hello.' });
       }
 
-      const safe_temp = (parseFloat(temperature) > 0) ? parseFloat(temperature) : 0.6;
+      const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
+      const safe_temp = isKimi ? 1.0 : (parseFloat(temperature) > 0 ? parseFloat(temperature) : 0.7);
       
       const nimRequest = {
         model: nimModel,
@@ -138,10 +144,14 @@
       };
 
       // Model-specific hardware reasoning switches
-      if (nimModel.includes('kimi') || nimModel.includes('moonshot')) {
-        nimRequest.reasoning_effort = "max";
-        nimRequest.thinking = { type: "enabled", budget_tokens: 4096 };
+      if (nimModel.includes('deepseek-v4')) {
+        nimRequest.reasoning_effort = "high";
         nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
+        nimRequest.extra_body = { chat_template_kwargs: { enable_thinking: true, thinking: true } };
+      } else if (isKimi) {
+        nimRequest.reasoning_effort = "high";
+        nimRequest.chat_template_kwargs = { thinking: true, enable_thinking: true };
+        nimRequest.extra_body = { chat_template_kwargs: { thinking: true, enable_thinking: true } };
       } else if (nimModel.includes('inkling')) {
         nimRequest.reasoning_effort = "high";
         nimRequest.chat_template_kwargs = { enable_thinking: true };
@@ -150,8 +160,6 @@
         nimRequest.reasoning_effort = "high";
       } else if (nimModel.includes('glm-5.2')) {
         nimRequest.chat_template_kwargs = { enable_thinking: true };
-      } else if (nimModel.includes('deepseek-v4')) {
-        nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
       } else if (nimModel.includes('step-3.7')) {
         nimRequest.reasoning_effort = "high";
       }
@@ -237,6 +245,11 @@
                   let reasoning = delta.reasoning_content || delta.reasoning || '';
                   let content = delta.content || '';
                   
+                  if (content) {
+                    content = content.replace(/<thought>/gi, '<think>')
+                                     .replace(/<\/thought>/gi, '</think>');
+                  }
+
                   if (SHOW_REASONING) {
                     let streamText = '';
 
@@ -290,6 +303,9 @@
           choices: response.data.choices.map(choice => {
             let fullContent = choice.message?.content || '';
             let reasoning = choice.message?.reasoning_content || choice.message?.reasoning || '';
+
+            fullContent = fullContent.replace(/<thought>/gi, '<think>')
+                                     .replace(/<\/thought>/gi, '</think>');
 
             if (SHOW_REASONING) {
               if (reasoning) {
@@ -353,4 +369,3 @@
     console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
   });
 })();
-                  
