@@ -1,4 +1,4 @@
-// server.js - OpenAI to NVIDIA NIM API Proxy with Inkling, Kimi & DeepSeek-v4 Integration
+// server.js - OpenAI to NVIDIA NIM API Proxy with DeepSeek, Kimi & Multi-Model Integration
 (async () => {
   const expressModule = await import('express');
   const express = expressModule.default || expressModule;
@@ -33,11 +33,17 @@
 
   // Model mapping dictionary
   const MODEL_MAPPING = {
+    // DeepSeek V4 Models
+    'deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
+    'deepseek-ai/deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
+    'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro-0813',
+    'deepseek-ai/deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro-0813',
     'deepseek-v4-flash-0731': 'deepseek-ai/deepseek-v4-flash-0731',
     'deepseek-ai/deepseek-v4-flash-0731': 'deepseek-ai/deepseek-v4-flash-0731',
     'deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash-0731',
     'deepseek-ai/deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash-0731',
-    'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro',
+
+    // Moonshot Kimi Models
     'kimi-k3': 'moonshotai/kimi-k3',
     'moonshotai/kimi-k3': 'moonshotai/kimi-k3',
     'kimi': 'moonshotai/kimi-k3',
@@ -46,6 +52,8 @@
     'kimi-k2.5': 'moonshotai/kimi-k2.5',
     'moonshotai/kimi-k2.5': 'moonshotai/kimi-k2.5',
     'kimi-k2.6': 'moonshotai/kimi-k2.6',
+
+    // Other NIM Models
     'inkling': 'thinkingmachines/inkling',
     'thinkingmachines/inkling': 'thinkingmachines/inkling',
     'minimax-m3': 'minimaxai/minimax-m3',
@@ -64,7 +72,7 @@
     res.json({ 
       status: 'ok', 
       service: 'OpenAI to NVIDIA NIM Proxy', 
-      default_model: 'deepseek-ai/deepseek-v4-flash-0731', 
+      default_model: 'deepseek-ai/deepseek-v4-pro-0813', 
       reasoning_display: SHOW_REASONING 
     });
   });
@@ -89,7 +97,7 @@
 
     try {
       const { model, messages, temperature } = req.body;
-      let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'deepseek-ai/deepseek-v4-flash-0731';
+      let nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'deepseek-ai/deepseek-v4-pro-0813';
       
       const normalizedMessages = [];
       let systemFound = false;
@@ -144,10 +152,14 @@
       };
 
       // Model-specific hardware reasoning switches
-      if (nimModel.includes('deepseek-v4')) {
+      if (nimModel.includes('deepseek-v4') || nimModel.includes('deepseek')) {
         nimRequest.reasoning_effort = "high";
+        nimRequest.thinking = { type: "enabled" };
         nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
-        nimRequest.extra_body = { chat_template_kwargs: { enable_thinking: true, thinking: true } };
+        nimRequest.extra_body = { 
+          thinking: { type: "enabled" },
+          chat_template_kwargs: { enable_thinking: true, thinking: true } 
+        };
       } else if (isKimi) {
         nimRequest.reasoning_effort = "high";
         nimRequest.chat_template_kwargs = { thinking: true, enable_thinking: true };
@@ -164,7 +176,7 @@
         nimRequest.reasoning_effort = "high";
       }
       
-      // SSE Headers
+      // Buffer-busting SSE headers and heartbeat
       if (streamMode) {
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -253,7 +265,7 @@
                   if (SHOW_REASONING) {
                     let streamText = '';
 
-                    // 1. Handle Dedicated Reasoning Channel
+                    // 1. Capture dedicated reasoning delta (NIM CoT channel)
                     if (reasoning) {
                       if (!reasoningStarted) {
                         streamText += '<think>\n';
@@ -263,7 +275,7 @@
                       streamText += reasoning;
                     } 
                     
-                    // 2. Handle Content Stream Transition
+                    // 2. Transition from CoT channel to final content delta
                     if (content) {
                       if (inChannelReasoning && reasoningStarted) {
                         streamText += '\n</think>\n\n';
@@ -369,3 +381,4 @@
     console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
   });
 })();
+    
