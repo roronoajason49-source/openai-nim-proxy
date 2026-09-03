@@ -1,4 +1,4 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy (Render + Vercel compatible)
+// server.js - OpenAI to NVIDIA NIM Proxy with Forced <think> Directives
 import express from 'express';
 import cors from 'cors';
 
@@ -84,7 +84,8 @@ app.post('/v1/chat/completions', async (req, res) => {
     const normalizedMessages = [];
     let systemFound = false;
 
-    const FORCE_THINKING_PROMPT = "\n\n[CRITICAL DIRECTIVE: Think deeply inside <think> and </think> tags before answering. You must plan the narrative, emotional state, and dialogue before writing your final response.]";
+    // 1. Strict System Directive
+    const FORCE_THINKING_SYSTEM = "\n\n[MANDATORY SYSTEM DIRECTIVE: The VERY FIRST characters of your response MUST be '<think>'. You are strictly forbidden from writing any narrative, dialogue, actions, or greetings before opening the '<think>' tag. You must formulate your subtext, character logic, and scene planning inside <think> and </think>. Output dialogue/action only AFTER closing the </think> tag.]";
 
     if (Array.isArray(messages)) {
       for (const msg of messages) {
@@ -94,7 +95,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
         if (role === 'system') {
           if (!systemFound) {
-            normalizedMessages.push({ role: 'system', content: msg.content + FORCE_THINKING_PROMPT });
+            normalizedMessages.push({ role: 'system', content: msg.content + FORCE_THINKING_SYSTEM });
             systemFound = true;
             continue;
           } else {
@@ -113,7 +114,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (!systemFound) {
       normalizedMessages.unshift({
         role: 'system',
-        content: 'You are an expert roleplay assistant.' + FORCE_THINKING_PROMPT
+        content: 'You are an advanced reasoning assistant.' + FORCE_THINKING_SYSTEM
       });
     }
 
@@ -121,10 +122,17 @@ app.post('/v1/chat/completions', async (req, res) => {
       normalizedMessages.splice(1, 0, { role: 'user', content: 'Hello.' });
     }
 
+    // 2. Trailing Anchor: Injected directly into the final user turn so it's the last thing the model reads
+    if (normalizedMessages.length > 0) {
+      const lastIdx = normalizedMessages.length - 1;
+      if (normalizedMessages[lastIdx].role === 'user') {
+        normalizedMessages[lastIdx].content += "\n\n[Instruction: Begin your reply immediately with '<think>'. Do not output anything before '<think>'.]";
+      }
+    }
+
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
     const safe_temp = isKimi ? 1.0 : (parseFloat(temperature) > 0 ? parseFloat(temperature) : 0.7);
 
-    // Standard NIM Request Body
     const nimRequest = {
       model: nimModel,
       messages: normalizedMessages,
@@ -132,7 +140,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       top_p: req.body.top_p ?? 0.95,
       max_tokens: req.body.max_tokens ? Math.max(req.body.max_tokens, 8192) : 8192,
       stream: streamMode,
-      // The single supported parameter for reasoning across NIM vLLM/SGLang backends
       chat_template_kwargs: {
         thinking: true,
         enable_thinking: true
@@ -166,7 +173,6 @@ app.post('/v1/chat/completions', async (req, res) => {
         res.flushHeaders();
       }
 
-      // Initial empty chunk to open the connection immediately
       const initChunk = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion.chunk',
@@ -222,7 +228,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                 if (SHOW_REASONING) {
                   let streamText = '';
 
-                  // Handle dedicated reasoning_content channel
+                  // Dedicated NIM reasoning stream
                   if (reasoning) {
                     if (!reasoningStarted) {
                       streamText += '<think>\n';
@@ -232,7 +238,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                     streamText += reasoning;
                   }
 
-                  // Transition out of think block when dialogue begins
+                  // Standard text channel
                   if (content) {
                     if (inChannelReasoning && reasoningStarted) {
                       streamText += '\n</think>\n\n';
