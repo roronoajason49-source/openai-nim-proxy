@@ -1,4 +1,4 @@
-// server.js - Cleaned OpenAI to NVIDIA NIM Proxy
+// server.js - Universal OpenAI to NVIDIA NIM Proxy (Render + Vercel compatible)
 import express from 'express';
 import cors from 'cors';
 
@@ -84,8 +84,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     const normalizedMessages = [];
     let systemFound = false;
 
-    // Direct, explicit instruction to emit the reasoning block
-    const FORCE_THINKING_PROMPT = "\n\n[CRITICAL SYSTEM DIRECTIVE: You are an advanced reasoning model. You MUST always think step-by-step before answering. Write out your detailed internal thoughts and roleplay planning inside <think> and </think> tags. Never skip the <think> phase. Write your dialogue and actions only AFTER closing the </think> tag.]";
+    const FORCE_THINKING_PROMPT = "\n\n[CRITICAL DIRECTIVE: Think deeply inside <think> and </think> tags before answering. You must plan the narrative, emotional state, and dialogue before writing your final response.]";
 
     if (Array.isArray(messages)) {
       for (const msg of messages) {
@@ -114,7 +113,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (!systemFound) {
       normalizedMessages.unshift({
         role: 'system',
-        content: 'You are an expert AI assistant.' + FORCE_THINKING_PROMPT
+        content: 'You are an expert roleplay assistant.' + FORCE_THINKING_PROMPT
       });
     }
 
@@ -125,22 +124,20 @@ app.post('/v1/chat/completions', async (req, res) => {
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
     const safe_temp = isKimi ? 1.0 : (parseFloat(temperature) > 0 ? parseFloat(temperature) : 0.7);
 
-    // Standard OpenAI schema only: removes unsupported top-level fields
+    // Standard NIM Request Body
     const nimRequest = {
       model: nimModel,
       messages: normalizedMessages,
       temperature: safe_temp,
       top_p: req.body.top_p ?? 0.95,
       max_tokens: req.body.max_tokens ? Math.max(req.body.max_tokens, 8192) : 8192,
-      stream: streamMode
+      stream: streamMode,
+      // The single supported parameter for reasoning across NIM vLLM/SGLang backends
+      chat_template_kwargs: {
+        thinking: true,
+        enable_thinking: true
+      }
     };
-
-    // DeepSeek V4 models use extra_body for reasoning kwargs
-    if (nimModel.includes('deepseek-v4')) {
-      nimRequest.extra_body = {
-        chat_template_kwargs: { thinking: true, reasoning_effort: "high" }
-      };
-    }
 
     const upstreamResponse = await fetch(`${NIM_API_BASE}/chat/completions`, {
       method: 'POST',
@@ -169,6 +166,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         res.flushHeaders();
       }
 
+      // Initial empty chunk to open the connection immediately
       const initChunk = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion.chunk',
@@ -234,7 +232,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                     streamText += reasoning;
                   }
 
-                  // Transition when standard dialogue/content begins
+                  // Transition out of think block when dialogue begins
                   if (content) {
                     if (inChannelReasoning && reasoningStarted) {
                       streamText += '\n</think>\n\n';
@@ -282,7 +280,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 });
 
 app.all('*', (req, res) => {
-  res.status(404).json({ error: { message: 'Endpoint not found', type: 'invalid_request_error', code: 404 } });
+  res.status(404).json({ error: { message: 'Endpoint not found', code: 404 } });
 });
 
 if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
