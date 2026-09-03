@@ -1,4 +1,4 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy (Render + Vercel compatible)
+// server.js - Cleaned OpenAI to NVIDIA NIM Proxy
 import express from 'express';
 import cors from 'cors';
 
@@ -84,6 +84,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     const normalizedMessages = [];
     let systemFound = false;
 
+    // Direct, explicit instruction to emit the reasoning block
     const FORCE_THINKING_PROMPT = "\n\n[CRITICAL SYSTEM DIRECTIVE: You are an advanced reasoning model. You MUST always think step-by-step before answering. Write out your detailed internal thoughts and roleplay planning inside <think> and </think> tags. Never skip the <think> phase. Write your dialogue and actions only AFTER closing the </think> tag.]";
 
     if (Array.isArray(messages)) {
@@ -124,6 +125,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
     const safe_temp = isKimi ? 1.0 : (parseFloat(temperature) > 0 ? parseFloat(temperature) : 0.7);
 
+    // Standard OpenAI schema only: removes unsupported top-level fields
     const nimRequest = {
       model: nimModel,
       messages: normalizedMessages,
@@ -133,34 +135,11 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: streamMode
     };
 
-    // Hardware thinking switches: dual payload across root and extra_body
-    if (isKimi) {
-      nimRequest.reasoning_effort = "high";
-      nimRequest.chat_template_kwargs = { thinking: true, enable_thinking: true };
+    // DeepSeek V4 models use extra_body for reasoning kwargs
+    if (nimModel.includes('deepseek-v4')) {
       nimRequest.extra_body = {
-        thinking: { type: "enabled" },
-        chat_template_kwargs: { thinking: true, enable_thinking: true }
+        chat_template_kwargs: { thinking: true, reasoning_effort: "high" }
       };
-    } else if (nimModel.includes('deepseek-v4') || nimModel.includes('deepseek')) {
-      nimRequest.reasoning_effort = "high";
-      nimRequest.thinking = { type: "enabled" };
-      nimRequest.chat_template_kwargs = { enable_thinking: true, thinking: true };
-      nimRequest.extra_body = {
-        thinking: { type: "enabled" },
-        chat_template_kwargs: { enable_thinking: true, thinking: true }
-      };
-    } else if (nimModel.includes('inkling')) {
-      nimRequest.reasoning_effort = "high";
-      nimRequest.chat_template_kwargs = { enable_thinking: true };
-      nimRequest.extra_body = { chat_template_kwargs: { enable_thinking: true } };
-    } else if (nimModel.includes('minimax')) {
-      nimRequest.thinking = { type: "enabled" };
-      nimRequest.reasoning_effort = "high";
-    } else if (nimModel.includes('glm-5.2')) {
-      nimRequest.chat_template_kwargs = { enable_thinking: true };
-      nimRequest.extra_body = { chat_template_kwargs: { enable_thinking: true } };
-    } else if (nimModel.includes('step-3.7')) {
-      nimRequest.reasoning_effort = "high";
     }
 
     const upstreamResponse = await fetch(`${NIM_API_BASE}/chat/completions`, {
@@ -245,7 +224,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                 if (SHOW_REASONING) {
                   let streamText = '';
 
-                  // Handle dedicated reasoning channel
+                  // Handle dedicated reasoning_content channel
                   if (reasoning) {
                     if (!reasoningStarted) {
                       streamText += '<think>\n';
@@ -255,7 +234,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                     streamText += reasoning;
                   }
 
-                  // Transition out of thinking when text content starts
+                  // Transition when standard dialogue/content begins
                   if (content) {
                     if (inChannelReasoning && reasoningStarted) {
                       streamText += '\n</think>\n\n';
@@ -303,7 +282,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 });
 
 app.all('*', (req, res) => {
-  res.status(404).json({ error: { message: 'Endpoint not found', code: 404 } });
+  res.status(404).json({ error: { message: 'Endpoint not found', type: 'invalid_request_error', code: 404 } });
 });
 
 if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
