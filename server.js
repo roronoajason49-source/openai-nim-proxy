@@ -34,7 +34,7 @@ const MODEL_MAPPING = {
   'glm-5.1': 'z-ai/glm-5.2',
   'z-ai/glm-5.1': 'z-ai/glm-5.2',
 
-  // DeepSeek V4 Models (Suffix enforced due to NIM endpoint deprecations)
+  // DeepSeek V4 Models
   'deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-ai/deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro-0813',
@@ -52,6 +52,7 @@ const MODEL_MAPPING = {
   'moonshotai/kimi-k2-thinking': 'moonshotai/kimi-k2-thinking',
   'kimi-k2.5': 'moonshotai/kimi-k2.5',
   'moonshotai/kimi-k2.5': 'moonshotai/kimi-k2.5',
+  'kimi-k2.6': 'moonshotai/kimi-k2.6',
 
   // Other NIM Models
   'inkling': 'thinkingmachines/inkling',
@@ -98,10 +99,8 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (Array.isArray(messages)) {
       for (const msg of messages) {
         if (!msg.content || typeof msg.content !== 'string' || msg.content.trim() === '') continue;
-        let role = msg.role.toLowerCase();
 
-        // NIM rejects the 'developer' role, ensure it converts to system
-        if (role === 'developer') role = 'system';
+        let role = msg.role.toLowerCase();
 
         if (role === 'system') {
           if (!systemFound) {
@@ -132,44 +131,25 @@ app.post('/v1/chat/completions', async (req, res) => {
       normalizedMessages.splice(1, 0, { role: 'user', content: 'Hello.' });
     }
 
-    // NIM Kimi strictly requires exactly 1.0; others default to 0.7
+    // Kimi strictly requires 1.0; GLM, DeepSeek, and Minimax default to 0.7
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
     const safe_temp = isKimi ? 1.0 : (parseFloat(temperature) > 0 ? parseFloat(temperature) : 0.7);
 
-    // Build the core NIM request
     const nimRequest = {
       model: nimModel,
       messages: normalizedMessages,
       temperature: safe_temp,
       top_p: req.body.top_p ?? 0.95,
       max_tokens: req.body.max_tokens ? Math.max(req.body.max_tokens, 8192) : 8192,
-      stream: streamMode
+      stream: streamMode,
+      // Standard OpenAI enum: strictly 'high' (never 'max')
+      reasoning_effort: 'high',
+      // NIM backend template switch
+      chat_template_kwargs: {
+        enable_thinking: true,
+        thinking: true
+      }
     };
-
-    // ==========================================
-    // CRITICAL FIX: EXACT PER-MODEL KWARGS
-    // NIM schema validation drops reasoning entirely if unexpected keys are present
-    // ==========================================
-    if (nimModel.includes('deepseek-v4')) {
-      // DeepSeek expects reasoning_effort nested INSIDE chat_template_kwargs
-      nimRequest.chat_template_kwargs = { thinking: true, reasoning_effort: "high" };
-    } else if (isKimi) {
-      // Kimi expects top-level reasoning_effort, and ONLY 'thinking' in kwargs
-      nimRequest.reasoning_effort = "high";
-      nimRequest.chat_template_kwargs = { thinking: true };
-    } else if (nimModel.includes('glm')) {
-      // GLM expects 'enable_thinking' and 'clear_thinking' toggles
-      nimRequest.chat_template_kwargs = { enable_thinking: true, clear_thinking: false };
-    } else if (nimModel.includes('minimax')) {
-      // MiniMax uses its own 'thinking_mode'
-      nimRequest.chat_template_kwargs = { thinking_mode: "enabled" };
-    } else if (nimModel.includes('inkling')) {
-      nimRequest.chat_template_kwargs = { reasoning_effort: "high" };
-    } else {
-      // Fallback
-      nimRequest.reasoning_effort = "high";
-    }
-    // ==========================================
 
     const upstreamResponse = await fetch(`${NIM_API_BASE}/chat/completions`, {
       method: 'POST',
@@ -198,6 +178,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         res.flushHeaders();
       }
 
+      // Initial chunk opens the connection immediately
       const initChunk = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion.chunk',
@@ -303,6 +284,37 @@ app.post('/v1/chat/completions', async (req, res) => {
       return res.end();
     } else {
       const json = await upstreamResponse.json();
+
+      if (Array.isArray(json.choices)) {
+        for (const choice of json.choices) {
+          const message = choice.message;
+          if (!message) continue;
+
+          const reasoning = message.reasoning_content || message.reasoning || '';
+          let content = message.content || '';
+
+          content = content.replace(/<thought>/gi, '<think>')
+                            .replace(/<\/thought>/gi, '</think>');
+
+          if (SHOW_REASONING) {
+            // Many NIM models (GLM, Kimi, MiniMax, etc.) return their chain-of-thought
+            // in a separate reasoning_content/reasoning field on the message object
+            // rather than inline in content. The streaming branch above already folds
+            // this into a visible <think> block; non-streaming needs the same treatment
+            // or Janitor (which only reads message.content) never sees it at all.
+            if (reasoning) {
+              content = `<think>\n${reasoning}\n</think>\n\n${content}`;
+            }
+          } else {
+            content = content.replace(/<think>[\s\S]*?<\/think>/g, '');
+          }
+
+          message.content = content;
+          delete message.reasoning_content;
+          delete message.reasoning;
+        }
+      }
+
       return res.json(json);
     }
   } catch (error) {
@@ -321,4 +333,3 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
 }
 
 export default app;
-                              
