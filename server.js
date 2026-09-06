@@ -1,16 +1,14 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy (Force-Think Edition)
+// server.js - Universal OpenAI to NVIDIA NIM Proxy (Smart Prefill Edition)
 import express from 'express';
 import cors from 'cors';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Environment variable sanitization
 let rawBase = (process.env.NIM_API_BASE || '').trim();
 if (!rawBase || rawBase === 'undefined' || rawBase === 'null' || rawBase.length < 5) {
   rawBase = 'https://integrate.api.nvidia.com/v1';
@@ -24,44 +22,30 @@ const NIM_API_KEY = (process.env.NIM_API_KEY || '').trim().replace(/['"]/g, '');
 
 const SHOW_REASONING = true;
 
-// Model mapping dictionary
 const MODEL_MAPPING = {
   // GLM Models
   'glm-5.3': 'z-ai/glm-5.3',
   'z-ai/glm-5.3': 'z-ai/glm-5.3',
   'glm-5.2': 'z-ai/glm-5.2',
-  'z-ai/glm-5.2': 'z-ai/glm-5.2',
-  'glm-5.1': 'z-ai/glm-5.2',
   'z-ai/glm-5.1': 'z-ai/glm-5.2',
 
   // DeepSeek V4 Models 
   'deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-ai/deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro-0813',
-  'deepseek-ai/deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-v4-flash-0731': 'deepseek-ai/deepseek-v4-flash-0731',
   'deepseek-ai/deepseek-v4-flash-0731': 'deepseek-ai/deepseek-v4-flash-0731',
-  'deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash-0731',
-  'deepseek-ai/deepseek-v4-flash': 'deepseek-ai/deepseek-v4-flash-0731',
 
   // Moonshot Kimi Models
   'kimi-k3': 'moonshotai/kimi-k3',
   'moonshotai/kimi-k3': 'moonshotai/kimi-k3',
-  'kimi': 'moonshotai/kimi-k3',
   'kimi-k2-thinking': 'moonshotai/kimi-k2-thinking',
-  'moonshotai/kimi-k2-thinking': 'moonshotai/kimi-k2-thinking',
   'kimi-k2.5': 'moonshotai/kimi-k2.5',
-  'moonshotai/kimi-k2.5': 'moonshotai/kimi-k2.5',
-  'kimi-k2.6': 'moonshotai/kimi-k2.6',
 
   // Other NIM Models
   'inkling': 'thinkingmachines/inkling',
-  'thinkingmachines/inkling': 'thinkingmachines/inkling',
   'minimax-m3': 'minimaxai/minimax-m3',
-  'minimaxai/minimax-m3': 'minimaxai/minimax-m3',
-  'minimax-m2.7': 'minimaxai/minimax-m2.7',
   'step-3.7-flash': 'stepfun-ai/step-3.7-flash',
-  'stepfun-ai/step-3.7-flash': 'stepfun-ai/step-3.7-flash',
   'qwen-122b': 'qwen/qwen3.5-122b-a10b'
 };
 
@@ -93,14 +77,12 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     const normalizedMessages = [];
     let systemFound = false;
-
-    const FORCE_THINKING_PROMPT = "\n\n[CRITICAL DIRECTIVE: Think step-by-step inside <think> and </think> tags before answering. Write out your planning and reasoning first. Output dialogue and actions only AFTER closing the </think> tag.]";
+    const FORCE_THINKING_PROMPT = "\n\n[CRITICAL DIRECTIVE: You are an advanced reasoning model. You MUST begin your response by thinking step-by-step inside <think>...</think> tags to plan character actions, emotions, and dialogue.]";
 
     if (Array.isArray(messages)) {
       for (const msg of messages) {
         if (!msg.content || typeof msg.content !== 'string' || msg.content.trim() === '') continue;
         let role = msg.role.toLowerCase();
-
         if (role === 'developer') role = 'system';
 
         if (role === 'system') {
@@ -128,8 +110,20 @@ app.post('/v1/chat/completions', async (req, res) => {
       });
     }
 
-    if (normalizedMessages.length > 1 && normalizedMessages[1].role === 'assistant') {
-      normalizedMessages.splice(1, 0, { role: 'user', content: 'Hello.' });
+    // ==========================================
+    // THE SILVER BULLET: INJECT NATIVE TAGS
+    // ==========================================
+    if (normalizedMessages.length > 0) {
+      const lastMsg = normalizedMessages[normalizedMessages.length - 1];
+      if (lastMsg.role === 'user') {
+        // Force the model to open the tag itself on its upcoming turn
+        lastMsg.content += "\n\n[System Note: Start your reply immediately with <think> to process the narrative.]";
+      } else if (lastMsg.role === 'assistant') {
+        // If Janitor AI uses "Assistant Prefill", append the tag directly into the prefill!
+        if (!lastMsg.content.includes('<think>')) {
+          lastMsg.content += "\n<think>\n";
+        }
+      }
     }
 
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
@@ -144,6 +138,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: streamMode
     };
 
+    // Safely assign backend kwargs
     if (nimModel.includes('deepseek-v4')) {
       nimRequest.chat_template_kwargs = { thinking: true, reasoning_effort: "high" };
     } else if (isKimi) {
@@ -153,8 +148,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       nimRequest.chat_template_kwargs = { enable_thinking: true, clear_thinking: false };
     } else if (nimModel.includes('minimax')) {
       nimRequest.chat_template_kwargs = { thinking_mode: "enabled" };
-    } else if (nimModel.includes('inkling')) {
-      nimRequest.chat_template_kwargs = { reasoning_effort: "high" };
     } else {
       nimRequest.reasoning_effort = "high";
     }
@@ -182,9 +175,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('Cache-Control', 'no-cache, no-transform');
       res.setHeader('Connection', 'keep-alive');
       res.setHeader('X-Accel-Buffering', 'no');
-      if (typeof res.flushHeaders === 'function') {
-        res.flushHeaders();
-      }
+      if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
       const initChunk = {
         id: `chatcmpl-${Date.now()}`,
@@ -197,13 +188,8 @@ app.post('/v1/chat/completions', async (req, res) => {
 
       const decoder = new TextDecoder();
       let buffer = '';
-      
-      // ==========================================
-      // FORCE THINKING STATE FLAGS
-      // ==========================================
-      let forcedThinkOpened = false;
-      let forcedThinkClosed = false;
-      let receivedReasoningChannel = false;
+      let reasoningStarted = false;
+      let inChannelReasoning = false;
 
       for await (const chunk of upstreamResponse.body) {
         buffer += decoder.decode(chunk, { stream: true });
@@ -216,8 +202,8 @@ app.post('/v1/chat/completions', async (req, res) => {
 
           if (line.startsWith('data: ')) {
             if (line.includes('[DONE]')) {
-              // Safety catch: Close tag if the stream ends while thinking
-              if (forcedThinkOpened && !forcedThinkClosed) {
+              // Only auto-close if we are sure a block is still open
+              if (reasoningStarted) {
                 const closeChunk = {
                   id: `chatcmpl-${Date.now()}`,
                   object: 'chat.completion.chunk',
@@ -238,47 +224,42 @@ app.post('/v1/chat/completions', async (req, res) => {
                 let reasoning = delta.reasoning_content || delta.reasoning || '';
                 let content = delta.content || '';
 
+                if (content) {
+                  content = content.replace(/<thought>/gi, '<think>').replace(/<\/thought>/gi, '</think>');
+                }
+
                 if (SHOW_REASONING) {
                   let streamText = '';
 
-                  // 1. FORCE THE OPENING TAG ON THE VERY FIRST CHUNK
-                  if (!forcedThinkOpened) {
-                    streamText += '<think>\n';
-                    forcedThinkOpened = true;
-                  }
-
-                  // 2. PIPE DEDICATED REASONING
+                  // Handle dedicated NIM reasoning channel
                   if (reasoning) {
-                    receivedReasoningChannel = true;
+                    if (!reasoningStarted) {
+                      streamText += '<think>\n';
+                      reasoningStarted = true;
+                      inChannelReasoning = true;
+                    }
                     streamText += reasoning;
                   }
 
-                  // 3. PROCESS STANDARD CONTENT
+                  // Handle Standard Content
                   if (content) {
-                    // Strip native opening tags so we don't end up with `<think><think>`
-                    content = content.replace(/<thought>/gi, '');
-                    content = content.replace(/<think>/gi, '');
-                    // Normalize native closing tags
-                    content = content.replace(/<\/thought>/gi, '</think>');
-
-                    // If we were getting dedicated reasoning, and now we get content, auto-close the block
-                    if (receivedReasoningChannel && !forcedThinkClosed) {
+                    // If we were in the dedicated channel, auto-close before content starts
+                    if (inChannelReasoning && reasoningStarted) {
                       streamText += '\n</think>\n\n';
-                      forcedThinkClosed = true;
+                      reasoningStarted = false;
+                      inChannelReasoning = false;
                     }
-
-                    // If the model sent thoughts purely inside 'content', tag it closed when we see it
-                    if (content.includes('</think>')) {
-                      forcedThinkClosed = true;
-                    }
+                    
+                    // Track native tags so we don't accidentally double-close
+                    if (content.includes('<think>')) reasoningStarted = true;
+                    if (content.includes('</think>')) reasoningStarted = false;
 
                     streamText += content;
                   }
 
                   data.choices[0].delta.content = streamText;
                 } else {
-                  // If SHOW_REASONING is false, cleanly remove everything
-                  data.choices[0].delta.content = content.replace(/<think>[\s\S]*?<\/think>/g, '').replace(/<thought>[\s\S]*?<\/thought>/g, '');
+                  data.choices[0].delta.content = content.replace(/<think>[\s\S]*?<\/think>/g, '');
                 }
 
                 delete data.choices[0].delta.reasoning_content;
@@ -291,26 +272,10 @@ app.post('/v1/chat/completions', async (req, res) => {
           }
         }
       }
-
-      if (forcedThinkOpened && !forcedThinkClosed) {
-        const closeChunk = {
-          id: `chatcmpl-${Date.now()}`,
-          object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000),
-          model: nimModel,
-          choices: [{ index: 0, delta: { content: '\n</think>\n\n' }, finish_reason: 'stop' }]
-        };
-        res.write(`data: ${JSON.stringify(closeChunk)}\n\n`);
-      }
       res.write('data: [DONE]\n\n');
       return res.end();
     } else {
-      
-      // ==========================================
-      // FORCE-THINK FOR NON-STREAMING
-      // ==========================================
       const upstreamJson = await upstreamResponse.json();
-      
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
@@ -320,19 +285,11 @@ app.post('/v1/chat/completions', async (req, res) => {
           let fullContent = choice.message?.content || '';
           let reasoning = choice.message?.reasoning_content || choice.message?.reasoning || '';
 
-          if (SHOW_REASONING) {
-            // Strip native opening tags 
-            fullContent = fullContent.replace(/<thought>/gi, '').replace(/<think>/gi, '');
-            fullContent = fullContent.replace(/<\/thought>/gi, '</think>');
+          fullContent = fullContent.replace(/<thought>/gi, '<think>').replace(/<\/thought>/gi, '</think>');
 
+          if (SHOW_REASONING) {
             if (reasoning) {
               fullContent = '<think>\n' + reasoning.trim() + '\n</think>\n\n' + fullContent;
-            } else if (fullContent.includes('</think>')) {
-              // It thought natively in content, just cap it
-              fullContent = '<think>\n' + fullContent;
-            } else {
-              // Force the block even if NIM completely bypassed thinking to prove UI works
-              fullContent = '<think>\n(Thinking bypassed by backend configuration)\n</think>\n\n' + fullContent;
             }
           } else {
             fullContent = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
@@ -365,4 +322,4 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
 }
 
 export default app;
-                
+          
