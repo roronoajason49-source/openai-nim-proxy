@@ -1,14 +1,16 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy (Render + Vercel compatible)
+// server.js - Universal OpenAI to NVIDIA NIM Proxy (Render & Vercel compatible)
 import express from 'express';
 import cors from 'cors';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
+// Environment variable sanitization
 let rawBase = (process.env.NIM_API_BASE || '').trim();
 if (!rawBase || rawBase === 'undefined' || rawBase === 'null' || rawBase.length < 5) {
   rawBase = 'https://integrate.api.nvidia.com/v1';
@@ -22,7 +24,16 @@ const NIM_API_KEY = (process.env.NIM_API_KEY || '').trim().replace(/['"]/g, '');
 
 const SHOW_REASONING = true;
 
+// Model mapping dictionary
 const MODEL_MAPPING = {
+  // GLM Models
+  'glm-5.3': 'z-ai/glm-5.3',
+  'z-ai/glm-5.3': 'z-ai/glm-5.3',
+  'glm-5.2': 'z-ai/glm-5.2',
+  'z-ai/glm-5.2': 'z-ai/glm-5.2',
+  'glm-5.1': 'z-ai/glm-5.2',
+  'z-ai/glm-5.1': 'z-ai/glm-5.2',
+
   // DeepSeek V4 Models
   'deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-ai/deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
@@ -41,6 +52,7 @@ const MODEL_MAPPING = {
   'moonshotai/kimi-k2-thinking': 'moonshotai/kimi-k2-thinking',
   'kimi-k2.5': 'moonshotai/kimi-k2.5',
   'moonshotai/kimi-k2.5': 'moonshotai/kimi-k2.5',
+  'kimi-k2.6': 'moonshotai/kimi-k2.6',
 
   // Other NIM Models
   'inkling': 'thinkingmachines/inkling',
@@ -50,8 +62,6 @@ const MODEL_MAPPING = {
   'minimax-m2.7': 'minimaxai/minimax-m2.7',
   'step-3.7-flash': 'stepfun-ai/step-3.7-flash',
   'stepfun-ai/step-3.7-flash': 'stepfun-ai/step-3.7-flash',
-  'glm-5.2': 'z-ai/glm-5.2',
-  'z-ai/glm-5.2': 'z-ai/glm-5.2',
   'qwen-122b': 'qwen/qwen3.5-122b-a10b'
 };
 
@@ -59,7 +69,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     service: 'OpenAI to NVIDIA NIM Proxy',
-    default_model: 'deepseek-ai/deepseek-v4-pro-0813',
+    default_model: 'z-ai/glm-5.3',
     reasoning_display: SHOW_REASONING
   });
 });
@@ -79,12 +89,12 @@ app.post('/v1/chat/completions', async (req, res) => {
 
   try {
     const { model, messages, temperature } = req.body;
-    const nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'deepseek-ai/deepseek-v4-pro-0813';
+    const nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'z-ai/glm-5.3';
 
     const normalizedMessages = [];
     let systemFound = false;
 
-    const FORCE_THINKING_PROMPT = "\n\n[CRITICAL DIRECTIVE: Think deeply inside <think> and </think> tags before answering. You must plan the narrative, emotional state, and dialogue before writing your final response.]";
+    const FORCE_THINKING_PROMPT = "\n\n[CRITICAL DIRECTIVE: Think step-by-step inside <think> and </think> tags before answering. Write out your planning and reasoning first. Output dialogue and actions only AFTER closing the </think> tag.]";
 
     if (Array.isArray(messages)) {
       for (const msg of messages) {
@@ -121,10 +131,10 @@ app.post('/v1/chat/completions', async (req, res) => {
       normalizedMessages.splice(1, 0, { role: 'user', content: 'Hello.' });
     }
 
+    // Kimi strictly requires 1.0; GLM, DeepSeek, and Minimax default to 0.7
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
     const safe_temp = isKimi ? 1.0 : (parseFloat(temperature) > 0 ? parseFloat(temperature) : 0.7);
 
-    // Standard NIM Request Body
     const nimRequest = {
       model: nimModel,
       messages: normalizedMessages,
@@ -132,10 +142,12 @@ app.post('/v1/chat/completions', async (req, res) => {
       top_p: req.body.top_p ?? 0.95,
       max_tokens: req.body.max_tokens ? Math.max(req.body.max_tokens, 8192) : 8192,
       stream: streamMode,
-      // The single supported parameter for reasoning across NIM vLLM/SGLang backends
+      // Standard OpenAI enum: strictly 'high' (never 'max')
+      reasoning_effort: 'high',
+      // NIM backend template switch
       chat_template_kwargs: {
-        thinking: true,
-        enable_thinking: true
+        enable_thinking: true,
+        thinking: true
       }
     };
 
@@ -166,7 +178,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         res.flushHeaders();
       }
 
-      // Initial empty chunk to open the connection immediately
+      // Initial chunk opens the connection immediately
       const initChunk = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion.chunk',
