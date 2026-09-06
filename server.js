@@ -34,7 +34,7 @@ const MODEL_MAPPING = {
   'glm-5.1': 'z-ai/glm-5.2',
   'z-ai/glm-5.1': 'z-ai/glm-5.2',
 
-  // DeepSeek V4 Models
+  // DeepSeek V4 Models 
   'deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-ai/deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro-0813',
@@ -99,8 +99,9 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (Array.isArray(messages)) {
       for (const msg of messages) {
         if (!msg.content || typeof msg.content !== 'string' || msg.content.trim() === '') continue;
-
         let role = msg.role.toLowerCase();
+
+        if (role === 'developer') role = 'system';
 
         if (role === 'system') {
           if (!systemFound) {
@@ -131,7 +132,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       normalizedMessages.splice(1, 0, { role: 'user', content: 'Hello.' });
     }
 
-    // Kimi strictly requires 1.0; GLM, DeepSeek, and Minimax default to 0.7
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
     const safe_temp = isKimi ? 1.0 : (parseFloat(temperature) > 0 ? parseFloat(temperature) : 0.7);
 
@@ -141,15 +141,23 @@ app.post('/v1/chat/completions', async (req, res) => {
       temperature: safe_temp,
       top_p: req.body.top_p ?? 0.95,
       max_tokens: req.body.max_tokens ? Math.max(req.body.max_tokens, 8192) : 8192,
-      stream: streamMode,
-      // Standard OpenAI enum: strictly 'high' (never 'max')
-      reasoning_effort: 'high',
-      // NIM backend template switch
-      chat_template_kwargs: {
-        enable_thinking: true,
-        thinking: true
-      }
+      stream: streamMode
     };
+
+    if (nimModel.includes('deepseek-v4')) {
+      nimRequest.chat_template_kwargs = { thinking: true, reasoning_effort: "high" };
+    } else if (isKimi) {
+      nimRequest.reasoning_effort = "high";
+      nimRequest.chat_template_kwargs = { thinking: true };
+    } else if (nimModel.includes('glm')) {
+      nimRequest.chat_template_kwargs = { enable_thinking: true, clear_thinking: false };
+    } else if (nimModel.includes('minimax')) {
+      nimRequest.chat_template_kwargs = { thinking_mode: "enabled" };
+    } else if (nimModel.includes('inkling')) {
+      nimRequest.chat_template_kwargs = { reasoning_effort: "high" };
+    } else {
+      nimRequest.reasoning_effort = "high";
+    }
 
     const upstreamResponse = await fetch(`${NIM_API_BASE}/chat/completions`, {
       method: 'POST',
@@ -178,7 +186,6 @@ app.post('/v1/chat/completions', async (req, res) => {
         res.flushHeaders();
       }
 
-      // Initial chunk opens the connection immediately
       const initChunk = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion.chunk',
@@ -234,7 +241,6 @@ app.post('/v1/chat/completions', async (req, res) => {
                 if (SHOW_REASONING) {
                   let streamText = '';
 
-                  // Handle dedicated reasoning_content channel
                   if (reasoning) {
                     if (!reasoningStarted) {
                       streamText += '<think>\n';
@@ -244,7 +250,6 @@ app.post('/v1/chat/completions', async (req, res) => {
                     streamText += reasoning;
                   }
 
-                  // Transition out of think block when dialogue begins
                   if (content) {
                     if (inChannelReasoning && reasoningStarted) {
                       streamText += '\n</think>\n\n';
@@ -283,39 +288,45 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.write('data: [DONE]\n\n');
       return res.end();
     } else {
-      const json = await upstreamResponse.json();
+      
+      // ==========================================
+      // CLAUDE'S FIX: NON-STREAMING BRANCH
+      // ==========================================
+      const upstreamJson = await upstreamResponse.json();
+      
+      const openaiResponse = {
+        id: `chatcmpl-${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: model,
+        choices: upstreamJson.choices?.map((choice) => {
+          let fullContent = choice.message?.content || '';
+          let reasoning = choice.message?.reasoning_content || choice.message?.reasoning || '';
 
-      if (Array.isArray(json.choices)) {
-        for (const choice of json.choices) {
-          const message = choice.message;
-          if (!message) continue;
+          // Normalize native <thought> tags if the model spat them directly into content
+          fullContent = fullContent.replace(/<thought>/gi, '<think>')
+                                   .replace(/<\/thought>/gi, '</think>');
 
-          const reasoning = message.reasoning_content || message.reasoning || '';
-          let content = message.content || '';
-
-          content = content.replace(/<thought>/gi, '<think>')
-                            .replace(/<\/thought>/gi, '</think>');
-
+          // Inject the reasoning channel back into standard content
           if (SHOW_REASONING) {
-            // Many NIM models (GLM, Kimi, MiniMax, etc.) return their chain-of-thought
-            // in a separate reasoning_content/reasoning field on the message object
-            // rather than inline in content. The streaming branch above already folds
-            // this into a visible <think> block; non-streaming needs the same treatment
-            // or Janitor (which only reads message.content) never sees it at all.
             if (reasoning) {
-              content = `<think>\n${reasoning}\n</think>\n\n${content}`;
+              fullContent = '<think>\n' + reasoning.trim() + '\n</think>\n\n' + fullContent;
             }
           } else {
-            content = content.replace(/<think>[\s\S]*?<\/think>/g, '');
+            // Strip it out if SHOW_REASONING is toggled to false at the top of the file
+            fullContent = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
           }
 
-          message.content = content;
-          delete message.reasoning_content;
-          delete message.reasoning;
-        }
-      }
-
-      return res.json(json);
+          return {
+            index: choice.index,
+            message: { role: choice.message?.role || 'assistant', content: fullContent },
+            finish_reason: choice.finish_reason || 'stop'
+          };
+        }) || [],
+        usage: upstreamJson.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+      };
+      
+      return res.json(openaiResponse);
     }
   } catch (error) {
     return res.status(500).json({ error: { message: error.message, type: 'proxy_error' } });
