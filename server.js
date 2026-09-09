@@ -1,4 +1,4 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy (Smart Prefill Edition)
+// server.js - Universal OpenAI to NVIDIA NIM Proxy (Optimized Streaming Edition)
 import express from 'express';
 import cors from 'cors';
 
@@ -44,7 +44,6 @@ const MODEL_MAPPING = {
 
   // Other NIM Models
   'inkling': 'thinkingmachines/inkling',
-  'minimax-m3': 'minimaxai/minimax-m3',
   'step-3.7-flash': 'stepfun-ai/step-3.7-flash',
   'qwen-122b': 'qwen/qwen3.5-122b-a10b'
 };
@@ -53,7 +52,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     service: 'OpenAI to NVIDIA NIM Proxy',
-    default_model: 'z-ai/glm-5.3',
+    default_model: 'deepseek-ai/deepseek-v4-pro-0813',
     reasoning_display: SHOW_REASONING
   });
 });
@@ -70,10 +69,15 @@ app.get('/v1/models', (req, res) => {
 
 app.post('/v1/chat/completions', async (req, res) => {
   const streamMode = req.body?.stream ?? false;
+  let heartbeat = null;
+
+  req.on('close', () => {
+    if (heartbeat) clearInterval(heartbeat);
+  });
 
   try {
     const { model, messages, temperature } = req.body;
-    const nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'z-ai/glm-5.3';
+    const nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'deepseek-ai/deepseek-v4-pro-0813';
 
     const normalizedMessages = [];
     let systemFound = false;
@@ -110,19 +114,11 @@ app.post('/v1/chat/completions', async (req, res) => {
       });
     }
 
-    // ==========================================
-    // THE SILVER BULLET: INJECT NATIVE TAGS
-    // ==========================================
+    // Direct directive to user turn only (avoiding assistant prefill collisions on NIM)
     if (normalizedMessages.length > 0) {
       const lastMsg = normalizedMessages[normalizedMessages.length - 1];
       if (lastMsg.role === 'user') {
-        // Force the model to open the tag itself on its upcoming turn
-        lastMsg.content += "\n\n[System Note: Start your reply immediately with <think> to process the narrative.]";
-      } else if (lastMsg.role === 'assistant') {
-        // If Janitor AI uses "Assistant Prefill", append the tag directly into the prefill!
-        if (!lastMsg.content.includes('<think>')) {
-          lastMsg.content += "\n<think>\n";
-        }
+        lastMsg.content += "\n\n[System Note: Think first before responding.]";
       }
     }
 
@@ -138,7 +134,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: streamMode
     };
 
-    // Safely assign backend kwargs
+    // Model-specific flags
     if (nimModel.includes('deepseek-v4')) {
       nimRequest.chat_template_kwargs = { thinking: true, reasoning_effort: "high" };
     } else if (isKimi) {
@@ -146,22 +142,26 @@ app.post('/v1/chat/completions', async (req, res) => {
       nimRequest.chat_template_kwargs = { thinking: true };
     } else if (nimModel.includes('glm')) {
       nimRequest.chat_template_kwargs = { enable_thinking: true, clear_thinking: false };
-    } else if (nimModel.includes('minimax')) {
-      nimRequest.chat_template_kwargs = { thinking_mode: "enabled" };
     } else {
       nimRequest.reasoning_effort = "high";
     }
+
+    // Set 120s timeout signal
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
 
     const upstreamResponse = await fetch(`${NIM_API_BASE}/chat/completions`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
         'Content-Type': 'application/json',
-        'Accept': streamMode ? 'text/event-stream' : 'application/json',
-        'Accept-Encoding': 'identity'
+        'Accept': streamMode ? 'text/event-stream' : 'application/json'
       },
-      body: JSON.stringify(nimRequest)
+      body: JSON.stringify(nimRequest),
+      signal: controller.signal
     });
+
+    clearTimeout(timeoutId);
 
     if (!upstreamResponse.ok) {
       const errText = await upstreamResponse.text();
@@ -177,6 +177,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('X-Accel-Buffering', 'no');
       if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
+      // 4KB padding prevents Vercel/Render reverse proxies from buffering initial output
+      res.write(': ' + ' '.repeat(4096) + '\n\n');
+
       const initChunk = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion.chunk',
@@ -185,6 +188,13 @@ app.post('/v1/chat/completions', async (req, res) => {
         choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }]
       };
       res.write(`data: ${JSON.stringify(initChunk)}\n\n`);
+
+      // Heartbeat keeps the connection alive during long reasoning phases
+      heartbeat = setInterval(() => {
+        if (!res.writableEnded) {
+          res.write(': keep-alive\n\n');
+        }
+      }, 2000);
 
       const decoder = new TextDecoder();
       let buffer = '';
@@ -202,7 +212,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
           if (line.startsWith('data: ')) {
             if (line.includes('[DONE]')) {
-              // Only auto-close if we are sure a block is still open
+              if (heartbeat) clearInterval(heartbeat);
               if (reasoningStarted) {
                 const closeChunk = {
                   id: `chatcmpl-${Date.now()}`,
@@ -231,7 +241,6 @@ app.post('/v1/chat/completions', async (req, res) => {
                 if (SHOW_REASONING) {
                   let streamText = '';
 
-                  // Handle dedicated NIM reasoning channel
                   if (reasoning) {
                     if (!reasoningStarted) {
                       streamText += '<think>\n';
@@ -241,16 +250,13 @@ app.post('/v1/chat/completions', async (req, res) => {
                     streamText += reasoning;
                   }
 
-                  // Handle Standard Content
                   if (content) {
-                    // If we were in the dedicated channel, auto-close before content starts
                     if (inChannelReasoning && reasoningStarted) {
                       streamText += '\n</think>\n\n';
                       reasoningStarted = false;
                       inChannelReasoning = false;
                     }
                     
-                    // Track native tags so we don't accidentally double-close
                     if (content.includes('<think>')) reasoningStarted = true;
                     if (content.includes('</think>')) reasoningStarted = false;
 
@@ -272,6 +278,8 @@ app.post('/v1/chat/completions', async (req, res) => {
           }
         }
       }
+
+      if (heartbeat) clearInterval(heartbeat);
       res.write('data: [DONE]\n\n');
       return res.end();
     } else {
@@ -307,6 +315,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       return res.json(openaiResponse);
     }
   } catch (error) {
+    if (heartbeat) clearInterval(heartbeat);
     return res.status(500).json({ error: { message: error.message, type: 'proxy_error' } });
   }
 });
@@ -322,4 +331,3 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
 }
 
 export default app;
-          
