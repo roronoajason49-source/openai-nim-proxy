@@ -1,4 +1,4 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy (Low-Latency SSE Edition)
+// server.js - Universal OpenAI to NVIDIA NIM Proxy (Optimized Streaming Edition)
 import express from 'express';
 import cors from 'cors';
 
@@ -114,6 +114,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       });
     }
 
+    // Direct directive to user turn only (avoiding assistant prefill collisions on NIM)
     if (normalizedMessages.length > 0) {
       const lastMsg = normalizedMessages[normalizedMessages.length - 1];
       if (lastMsg.role === 'user') {
@@ -124,59 +125,30 @@ app.post('/v1/chat/completions', async (req, res) => {
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
     const safe_temp = isKimi ? 1.0 : (parseFloat(temperature) > 0 ? parseFloat(temperature) : 0.7);
 
-    // Dynamic token budgeting: Don't force an 8192 memory block on busy nodes
-    const requestedTokens = parseInt(req.body.max_tokens, 10);
-    const safe_max_tokens = (!isNaN(requestedTokens) && requestedTokens > 0) 
-      ? Math.min(requestedTokens, 4096) 
-      : 2048;
-
     const nimRequest = {
       model: nimModel,
       messages: normalizedMessages,
       temperature: safe_temp,
       top_p: req.body.top_p ?? 0.95,
-      max_tokens: safe_max_tokens,
+      max_tokens: req.body.max_tokens ? Math.max(req.body.max_tokens, 8192) : 8192,
       stream: streamMode
     };
 
+    // Model-specific flags
     if (nimModel.includes('deepseek-v4')) {
-      nimRequest.chat_template_kwargs = { thinking: true };
+      nimRequest.chat_template_kwargs = { thinking: true, reasoning_effort: "high" };
     } else if (isKimi) {
-      nimRequest.chat_template_kwargs = { thinking: true, enable_thinking: true };
+      nimRequest.reasoning_effort = "high";
+      nimRequest.chat_template_kwargs = { thinking: true };
     } else if (nimModel.includes('glm')) {
-      nimRequest.chat_template_kwargs = { enable_thinking: true };
+      nimRequest.chat_template_kwargs = { enable_thinking: true, clear_thinking: false };
+    } else {
+      nimRequest.reasoning_effort = "high";
     }
 
-    // IMMEDIATE SSE HANDSHAKE: Send headers and heartbeats BEFORE awaiting NVIDIA fetch
-    if (streamMode) {
-      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-cache, no-transform');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Accel-Buffering', 'no');
-      if (typeof res.flushHeaders === 'function') res.flushHeaders();
-
-      // 4KB comment forces reverse-proxy buffers (Render/Vercel/Cloudflare) to open immediately
-      res.write(': ' + ' '.repeat(4096) + '\n\n');
-
-      const initChunk = {
-        id: `chatcmpl-${Date.now()}`,
-        object: 'chat.completion.chunk',
-        created: Math.floor(Date.now() / 1000),
-        model: nimModel,
-        choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }]
-      };
-      res.write(`data: ${JSON.stringify(initChunk)}\n\n`);
-
-      // Heartbeat pings every 2s prevent Janitor AI and Vercel/Render from dropping connection
-      heartbeat = setInterval(() => {
-        if (!res.writableEnded) {
-          res.write(': keep-alive\n\n');
-        }
-      }, 2000);
-    }
-
+    // Set 120s timeout signal
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 180000);
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
 
     const upstreamResponse = await fetch(`${NIM_API_BASE}/chat/completions`, {
       method: 'POST',
@@ -192,28 +164,38 @@ app.post('/v1/chat/completions', async (req, res) => {
     clearTimeout(timeoutId);
 
     if (!upstreamResponse.ok) {
-      if (heartbeat) clearInterval(heartbeat);
       const errText = await upstreamResponse.text();
-      
-      if (streamMode) {
-        const errChunk = {
-          id: `error-${Date.now()}`,
-          object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000),
-          model: nimModel,
-          choices: [{ index: 0, delta: { content: `\n\n*[NVIDIA NIM Error ${upstreamResponse.status}: ${errText}]*` }, finish_reason: 'stop' }]
-        };
-        res.write(`data: ${JSON.stringify(errChunk)}\n\n`);
-        res.write('data: [DONE]\n\n');
-        return res.end();
-      }
-
       return res.status(upstreamResponse.status).json({
         error: { message: errText, code: upstreamResponse.status }
       });
     }
 
     if (streamMode) {
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+      // 4KB padding prevents Vercel/Render reverse proxies from buffering initial output
+      res.write(': ' + ' '.repeat(4096) + '\n\n');
+
+      const initChunk = {
+        id: `chatcmpl-${Date.now()}`,
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model: nimModel,
+        choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }]
+      };
+      res.write(`data: ${JSON.stringify(initChunk)}\n\n`);
+
+      // Heartbeat keeps the connection alive during long reasoning phases
+      heartbeat = setInterval(() => {
+        if (!res.writableEnded) {
+          res.write(': keep-alive\n\n');
+        }
+      }, 2000);
+
       const decoder = new TextDecoder();
       let buffer = '';
       let reasoningStarted = false;
@@ -349,4 +331,3 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
 }
 
 export default app;
-      
