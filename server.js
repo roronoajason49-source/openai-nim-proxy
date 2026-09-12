@@ -21,8 +21,6 @@ const NIM_API_BASE = rawBase.replace(/\/+$/, '');
 const NIM_API_KEY = (process.env.NIM_API_KEY || '').trim().replace(/['"]/g, '');
 
 const SHOW_REASONING = true;
-// Keeps prompt size manageable to prevent NIM scheduler queue delays
-const MAX_HISTORY_MESSAGES = parseInt(process.env.MAX_HISTORY_MESSAGES || '26', 10);
 
 const MODEL_MAPPING = {
   // GLM Models
@@ -31,7 +29,7 @@ const MODEL_MAPPING = {
   'glm-5.2': 'z-ai/glm-5.2',
   'z-ai/glm-5.1': 'z-ai/glm-5.2',
 
-  // DeepSeek Models 
+  // DeepSeek V4 Models 
   'deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-ai/deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro-0813',
@@ -55,7 +53,7 @@ app.get('/health', (req, res) => {
     status: 'ok',
     service: 'OpenAI to NVIDIA NIM Proxy',
     default_model: 'deepseek-ai/deepseek-v4-pro-0813',
-    reasoning_effort: 'high'
+    reasoning_display: SHOW_REASONING
   });
 });
 
@@ -79,11 +77,15 @@ app.post('/v1/chat/completions', async (req, res) => {
 
   try {
     const { model, messages, temperature } = req.body;
-    const nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'deepseek-ai/deepseek-v4-pro-0813';
+    
+    // Resolve model mapping; allow direct pass-through if model includes vendor slash
+    const nimModel = MODEL_MAPPING[model] || 
+                     MODEL_MAPPING[model?.toLowerCase()] || 
+                     (model && model.includes('/') ? model : 'deepseek-ai/deepseek-v4-pro-0813');
 
-    // 1. Separate system instructions from conversational history
-    let systemPrompts = [];
-    let chatHistory = [];
+    // 1. Cleanly consolidate messages without corrupting system entries into user turns
+    const systemParts = [];
+    const chatTurns = [];
 
     if (Array.isArray(messages)) {
       for (const msg of messages) {
@@ -91,65 +93,61 @@ app.post('/v1/chat/completions', async (req, res) => {
         const role = msg.role.toLowerCase();
 
         if (role === 'system' || role === 'developer') {
-          systemPrompts.push(msg.content.trim());
+          systemParts.push(msg.content.trim());
         } else {
-          chatHistory.push({ role, content: msg.content.trim() });
+          // Merge consecutive identical roles to comply with strict NIM chat templates
+          if (chatTurns.length > 0 && chatTurns[chatTurns.length - 1].role === role) {
+            chatTurns[chatTurns.length - 1].content += '\n\n' + msg.content.trim();
+          } else {
+            chatTurns.push({ role, content: msg.content.trim() });
+          }
         }
       }
     }
 
-    // 2. Prevent multi-minute queue hold by applying sliding window to long chats
-    if (chatHistory.length > MAX_HISTORY_MESSAGES) {
-      chatHistory = chatHistory.slice(-MAX_HISTORY_MESSAGES);
-    }
+    const normalizedMessages = [];
+    const baseSystemPrompt = systemParts.length > 0 
+      ? systemParts.join('\n\n---\n\n') 
+      : 'You are an expert roleplay assistant.';
 
-    // 3. Build a single consolidated System prompt to avoid NeMo Guardrail triggers
-    const DIRECTIVE = "\n\n[DIRECTIVE: Think thoroughly step-by-step inside <think>...</think> tags to plan character dialogue, subtle actions, and tone before writing your final response.]";
-    let mergedSystem = systemPrompts.length > 0 
-      ? systemPrompts.join('\n\n') + DIRECTIVE 
-      : 'You are an immersive roleplay assistant.' + DIRECTIVE;
+    normalizedMessages.push({ role: 'system', content: baseSystemPrompt });
+    normalizedMessages.push(...chatTurns);
 
-    const normalizedMessages = [{ role: 'system', content: mergedSystem }];
-
-    // 4. Merge consecutive messages with the same role
-    for (const msg of chatHistory) {
-      const last = normalizedMessages[normalizedMessages.length - 1];
-      if (last.role === msg.role) {
-        last.content += '\n\n' + msg.content;
-      } else {
-        normalizedMessages.push({ role: msg.role, content: msg.content });
-      }
-    }
+    // 2. Configure reasoning effort (strictly 'high' or 'max')
+    const requestedEffort = (req.body.reasoning_effort || '').toLowerCase();
+    const safeReasoningEffort = requestedEffort === 'max' ? 'max' : 'high';
 
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
     const safe_temp = isKimi ? 1.0 : (parseFloat(temperature) > 0 ? parseFloat(temperature) : 0.7);
 
-    // 5. Reserve 4096 tokens (sufficient for reasoning + RP without clogging the GPU scheduler)
-    const targetMaxTokens = req.body.max_tokens 
-      ? Math.min(Math.max(parseInt(req.body.max_tokens, 10), 4096), 6144) 
+    // 3. Optimize max_tokens: Janitor default safe ceiling (4096) avoids KV-cache queue locks
+    const rawMaxTokens = parseInt(req.body.max_tokens, 10);
+    const resolvedMaxTokens = (!isNaN(rawMaxTokens) && rawMaxTokens > 0)
+      ? Math.min(Math.max(rawMaxTokens, 2048), 4096)
       : 4096;
-
-    // Strict adherence: Maintain 'high' or 'max' only
-    const reasoningEffort = req.body.reasoning_effort === 'max' ? 'max' : 'high';
 
     const nimRequest = {
       model: nimModel,
       messages: normalizedMessages,
       temperature: safe_temp,
       top_p: req.body.top_p ?? 0.95,
-      max_tokens: targetMaxTokens,
-      stream: streamMode,
-      reasoning_effort: reasoningEffort
+      max_tokens: resolvedMaxTokens,
+      reasoning_effort: safeReasoningEffort,
+      stream: streamMode
     };
 
+    // Model-specific template kwargs
     if (nimModel.includes('deepseek')) {
-      nimRequest.chat_template_kwargs = { thinking: true, reasoning_effort: reasoningEffort };
+      nimRequest.chat_template_kwargs = { thinking: true };
     } else if (isKimi) {
       nimRequest.chat_template_kwargs = { thinking: true };
     } else if (nimModel.includes('glm')) {
       nimRequest.chat_template_kwargs = { enable_thinking: true, clear_thinking: false };
     }
 
+    // ==========================================
+    // STREAM INITIALIZATION
+    // ==========================================
     if (streamMode) {
       res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
       res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -157,7 +155,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('X-Accel-Buffering', 'no');
       if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
-      // Send 4KB whitespace padding to bypass reverse-proxy buffering
+      // Send initial buffer to clear reverse proxy buffers (Render/Cloudflare)
       res.write(': ' + ' '.repeat(4096) + '\n\n');
 
       const initChunk = {
@@ -169,6 +167,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       };
       res.write(`data: ${JSON.stringify(initChunk)}\n\n`);
 
+      // Keep connection alive while NVIDIA allocates the slot
       heartbeat = setInterval(() => {
         if (!res.writableEnded) {
           res.write(': keep-alive\n\n');
@@ -177,7 +176,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 min safety cap
+    const timeoutId = setTimeout(() => controller.abort(), 300000);
 
     let upstreamResponse;
     try {
@@ -186,8 +185,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         headers: {
           'Authorization': `Bearer ${NIM_API_KEY}`,
           'Content-Type': 'application/json',
-          'Accept': streamMode ? 'text/event-stream' : 'application/json',
-          'User-Agent': 'NVIDIA-NIM-RP-Proxy/2.0'
+          'Accept': streamMode ? 'text/event-stream' : 'application/json'
         },
         body: JSON.stringify(nimRequest),
         signal: controller.signal
@@ -195,13 +193,12 @@ app.post('/v1/chat/completions', async (req, res) => {
     } catch (fetchErr) {
       clearTimeout(timeoutId);
       if (heartbeat) clearInterval(heartbeat);
-
       if (streamMode) {
         const errorChunk = {
           id: `error-${Date.now()}`,
           object: 'chat.completion.chunk',
           created: Math.floor(Date.now() / 1000),
-          choices: [{ index: 0, delta: { content: `\n\n*[Connection Timeout: ${fetchErr.message}]*` }, finish_reason: 'stop' }]
+          choices: [{ index: 0, delta: { content: `\n\n*[Upstream Timeout/Error: ${fetchErr.message}]*` }, finish_reason: 'stop' }]
         };
         res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
         res.write('data: [DONE]\n\n');
@@ -222,7 +219,7 @@ app.post('/v1/chat/completions', async (req, res) => {
           id: `error-${Date.now()}`,
           object: 'chat.completion.chunk',
           created: Math.floor(Date.now() / 1000),
-          choices: [{ index: 0, delta: { content: `\n\n*[NVIDIA Error ${upstreamResponse.status}: ${errText}]*` }, finish_reason: 'stop' }]
+          choices: [{ index: 0, delta: { content: `\n\n*[Proxy Error ${upstreamResponse.status}: NVIDIA NIM rejected request: ${errText}]*` }, finish_reason: 'stop' }]
         };
         res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
         res.write('data: [DONE]\n\n');
@@ -358,7 +355,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (!res.headersSent) {
       return res.status(500).json({ error: { message: error.message, type: 'proxy_error' } });
     } else {
-      res.write(`data: ${JSON.stringify({choices: [{delta: {content: `\n\n*[Proxy Error: ${error.message}]*`}, finish_reason: 'stop'}]})}\n\n`);
+      res.write(`data: ${JSON.stringify({choices: [{delta: {content: `\n\n*[Internal Error: ${error.message}]*`}, finish_reason: 'stop'}]})}\n\n`);
       res.write('data: [DONE]\n\n');
       return res.end();
     }
