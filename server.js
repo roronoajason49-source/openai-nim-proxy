@@ -1,4 +1,4 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy (Fast Memory Allocation Edition)
+// server.js - Universal OpenAI to NVIDIA NIM Proxy (Early Heartbeat Edition)
 import express from 'express';
 import cors from 'cors';
 
@@ -124,16 +124,12 @@ app.post('/v1/chat/completions', async (req, res) => {
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
     const safe_temp = isKimi ? 1.0 : (parseFloat(temperature) > 0 ? parseFloat(temperature) : 0.7);
 
-    // FIX: Respect the client's token limit but cap it at 4096 so NIM doesn't block the request in queue
-    let safe_max_tokens = req.body.max_tokens ? parseInt(req.body.max_tokens) : 2048;
-    if (safe_max_tokens > 4096) safe_max_tokens = 4096;
-
     const nimRequest = {
       model: nimModel,
       messages: normalizedMessages,
       temperature: safe_temp,
       top_p: req.body.top_p ?? 0.95,
-      max_tokens: safe_max_tokens,
+      max_tokens: req.body.max_tokens ? Math.max(req.body.max_tokens, 8192) : 8192,
       stream: streamMode
     };
 
@@ -148,6 +144,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       nimRequest.reasoning_effort = "high";
     }
 
+    // ==========================================
+    // EARLY STREAM INITIALIZATION
+    // ==========================================
     if (streamMode) {
       res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
       res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -155,6 +154,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('X-Accel-Buffering', 'no');
       if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
+      // Immediately send the 4KB padding BEFORE fetching
       res.write(': ' + ' '.repeat(4096) + '\n\n');
 
       const initChunk = {
@@ -166,6 +166,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       };
       res.write(`data: ${JSON.stringify(initChunk)}\n\n`);
 
+      // Start pinging Janitor AI immediately while we wait in NVIDIA's queue
       heartbeat = setInterval(() => {
         if (!res.writableEnded) {
           res.write(': keep-alive\n\n');
@@ -173,8 +174,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       }, 2000);
     }
 
+    // Extended timeout to account for severe queue times
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 300000); 
+    const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
 
     let upstreamResponse;
     try {
@@ -371,4 +373,4 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
 }
 
 export default app;
-            
+                  
