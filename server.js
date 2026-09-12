@@ -1,4 +1,4 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy (Early Heartbeat Edition)
+// server.js - Universal OpenAI to NVIDIA NIM Proxy
 import express from 'express';
 import cors from 'cors';
 
@@ -29,7 +29,7 @@ const MODEL_MAPPING = {
   'glm-5.2': 'z-ai/glm-5.2',
   'z-ai/glm-5.1': 'z-ai/glm-5.2',
 
-  // DeepSeek V4 Models 
+  // DeepSeek Models
   'deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-ai/deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro-0813',
@@ -114,38 +114,35 @@ app.post('/v1/chat/completions', async (req, res) => {
       });
     }
 
-    if (normalizedMessages.length > 0) {
-      const lastMsg = normalizedMessages[normalizedMessages.length - 1];
-      if (lastMsg.role === 'user') {
-        lastMsg.content += "\n\n[System Note: Think first before responding.]";
-      }
-    }
-
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
     const safe_temp = isKimi ? 1.0 : (parseFloat(temperature) > 0 ? parseFloat(temperature) : 0.7);
+
+    // Limit memory allocation so NIM schedules the job faster
+    const targetMaxTokens = req.body.max_tokens ? Math.min(req.body.max_tokens, 4096) : 2048;
 
     const nimRequest = {
       model: nimModel,
       messages: normalizedMessages,
       temperature: safe_temp,
       top_p: req.body.top_p ?? 0.95,
-      max_tokens: req.body.max_tokens ? Math.max(req.body.max_tokens, 8192) : 8192,
+      max_tokens: targetMaxTokens,
       stream: streamMode
     };
 
-    if (nimModel.includes('deepseek-v4')) {
-      nimRequest.chat_template_kwargs = { thinking: true, reasoning_effort: "high" };
+    // Use "medium" reasoning by default to reduce queue time and prefill latency
+    if (nimModel.includes('deepseek')) {
+      nimRequest.chat_template_kwargs = { thinking: true, reasoning_effort: "medium" };
     } else if (isKimi) {
-      nimRequest.reasoning_effort = "high";
+      nimRequest.reasoning_effort = "medium";
       nimRequest.chat_template_kwargs = { thinking: true };
     } else if (nimModel.includes('glm')) {
       nimRequest.chat_template_kwargs = { enable_thinking: true, clear_thinking: false };
     } else {
-      nimRequest.reasoning_effort = "high";
+      nimRequest.reasoning_effort = "medium";
     }
 
     // ==========================================
-    // EARLY STREAM INITIALIZATION
+    // EARLY STREAM INITIALIZATION & HEARTBEAT
     // ==========================================
     if (streamMode) {
       res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -154,19 +151,19 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('X-Accel-Buffering', 'no');
       if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
-      // Immediately send the 4KB padding BEFORE fetching
-      res.write(': ' + ' '.repeat(4096) + '\n\n');
+      // Send standard browser proxy padding
+      res.write(': ' + ' '.repeat(2048) + '\n\n');
 
+      // Send initial chunk with an invisible zero-width space so Janitor AI resets its client timeout
       const initChunk = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion.chunk',
         created: Math.floor(Date.now() / 1000),
         model: nimModel,
-        choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }]
+        choices: [{ index: 0, delta: { role: 'assistant', content: '\u200B' }, finish_reason: null }]
       };
       res.write(`data: ${JSON.stringify(initChunk)}\n\n`);
 
-      // Start pinging Janitor AI immediately while we wait in NVIDIA's queue
       heartbeat = setInterval(() => {
         if (!res.writableEnded) {
           res.write(': keep-alive\n\n');
@@ -174,9 +171,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       }, 2000);
     }
 
-    // Extended timeout to account for severe queue times
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+    const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minute upstream cutoff
 
     let upstreamResponse;
     try {
@@ -219,7 +215,7 @@ app.post('/v1/chat/completions', async (req, res) => {
           id: `error-${Date.now()}`,
           object: 'chat.completion.chunk',
           created: Math.floor(Date.now() / 1000),
-          choices: [{ index: 0, delta: { content: `\n\n*[Proxy Error ${upstreamResponse.status}: NVIDIA NIM rejected request: ${errText}]*` }, finish_reason: 'stop' }]
+          choices: [{ index: 0, delta: { content: `\n\n*[Proxy Error ${upstreamResponse.status}: ${errText}]*` }, finish_reason: 'stop' }]
         };
         res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
         res.write('data: [DONE]\n\n');
@@ -331,11 +327,9 @@ app.post('/v1/chat/completions', async (req, res) => {
 
           fullContent = fullContent.replace(/<thought>/gi, '<think>').replace(/<\/thought>/gi, '</think>');
 
-          if (SHOW_REASONING) {
-            if (reasoning) {
-              fullContent = '<think>\n' + reasoning.trim() + '\n</think>\n\n' + fullContent;
-            }
-          } else {
+          if (SHOW_REASONING && reasoning) {
+            fullContent = '<think>\n' + reasoning.trim() + '\n</think>\n\n' + fullContent;
+          } else if (!SHOW_REASONING) {
             fullContent = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
           }
 
