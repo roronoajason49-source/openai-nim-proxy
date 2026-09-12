@@ -1,4 +1,4 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy (Optimized Low-Latency Edition)
+// server.js - Universal OpenAI to NVIDIA NIM Proxy (Optimized Queue Edition)
 import express from 'express';
 import cors from 'cors';
 
@@ -77,54 +77,51 @@ app.post('/v1/chat/completions', async (req, res) => {
 
   try {
     const { model, messages, temperature } = req.body;
-    
-    // Resolve model mapping; allow direct pass-through if model includes vendor slash
-    const nimModel = MODEL_MAPPING[model] || 
-                     MODEL_MAPPING[model?.toLowerCase()] || 
-                     (model && model.includes('/') ? model : 'deepseek-ai/deepseek-v4-pro-0813');
+    const nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'deepseek-ai/deepseek-v4-pro-0813';
 
-    // 1. Cleanly consolidate messages without corrupting system entries into user turns
-    const systemParts = [];
-    const chatTurns = [];
+    // Normalize incoming messages without injecting forced prompts
+    const normalizedMessages = [];
+    let systemFound = false;
 
     if (Array.isArray(messages)) {
       for (const msg of messages) {
         if (!msg.content || typeof msg.content !== 'string' || msg.content.trim() === '') continue;
-        const role = msg.role.toLowerCase();
+        let role = msg.role.toLowerCase();
+        if (role === 'developer') role = 'system';
 
-        if (role === 'system' || role === 'developer') {
-          systemParts.push(msg.content.trim());
-        } else {
-          // Merge consecutive identical roles to comply with strict NIM chat templates
-          if (chatTurns.length > 0 && chatTurns[chatTurns.length - 1].role === role) {
-            chatTurns[chatTurns.length - 1].content += '\n\n' + msg.content.trim();
+        if (role === 'system') {
+          if (!systemFound) {
+            normalizedMessages.push({ role: 'system', content: msg.content.trim() });
+            systemFound = true;
+            continue;
           } else {
-            chatTurns.push({ role, content: msg.content.trim() });
+            role = 'user';
           }
+        }
+
+        if (normalizedMessages.length > 0 && normalizedMessages[normalizedMessages.length - 1].role === role) {
+          normalizedMessages[normalizedMessages.length - 1].content += '\n\n' + msg.content;
+        } else {
+          normalizedMessages.push({ role, content: msg.content });
         }
       }
     }
 
-    const normalizedMessages = [];
-    const baseSystemPrompt = systemParts.length > 0 
-      ? systemParts.join('\n\n---\n\n') 
-      : 'You are an expert roleplay assistant.';
-
-    normalizedMessages.push({ role: 'system', content: baseSystemPrompt });
-    normalizedMessages.push(...chatTurns);
-
-    // 2. Configure reasoning effort (strictly 'high' or 'max')
-    const requestedEffort = (req.body.reasoning_effort || '').toLowerCase();
-    const safeReasoningEffort = requestedEffort === 'max' ? 'max' : 'high';
+    if (!systemFound) {
+      normalizedMessages.unshift({
+        role: 'system',
+        content: 'You are an expert roleplay assistant.'
+      });
+    }
 
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
     const safe_temp = isKimi ? 1.0 : (parseFloat(temperature) > 0 ? parseFloat(temperature) : 0.7);
 
-    // 3. Optimize max_tokens: Janitor default safe ceiling (4096) avoids KV-cache queue locks
-    const rawMaxTokens = parseInt(req.body.max_tokens, 10);
-    const resolvedMaxTokens = (!isNaN(rawMaxTokens) && rawMaxTokens > 0)
-      ? Math.min(Math.max(rawMaxTokens, 2048), 4096)
-      : 4096;
+    // Dynamic max_tokens: Respect Janitor AI's setting to avoid NIM scheduler de-prioritization
+    const clientMaxTokens = parseInt(req.body.max_tokens, 10);
+    const resolvedMaxTokens = !isNaN(clientMaxTokens) && clientMaxTokens > 0 
+      ? Math.min(clientMaxTokens, 4096) 
+      : 3000;
 
     const nimRequest = {
       model: nimModel,
@@ -132,21 +129,23 @@ app.post('/v1/chat/completions', async (req, res) => {
       temperature: safe_temp,
       top_p: req.body.top_p ?? 0.95,
       max_tokens: resolvedMaxTokens,
-      reasoning_effort: safeReasoningEffort,
       stream: streamMode
     };
 
-    // Model-specific template kwargs
-    if (nimModel.includes('deepseek')) {
-      nimRequest.chat_template_kwargs = { thinking: true };
+    // Keep reasoning effort strictly at "high"
+    if (nimModel.includes('deepseek-v4')) {
+      nimRequest.chat_template_kwargs = { thinking: true, reasoning_effort: 'high' };
     } else if (isKimi) {
+      nimRequest.reasoning_effort = 'high';
       nimRequest.chat_template_kwargs = { thinking: true };
     } else if (nimModel.includes('glm')) {
       nimRequest.chat_template_kwargs = { enable_thinking: true, clear_thinking: false };
+    } else {
+      nimRequest.reasoning_effort = 'high';
     }
 
     // ==========================================
-    // STREAM INITIALIZATION
+    // STREAM INITIALIZATION & KEEP-ALIVE
     // ==========================================
     if (streamMode) {
       res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -155,7 +154,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('X-Accel-Buffering', 'no');
       if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
-      // Send initial buffer to clear reverse proxy buffers (Render/Cloudflare)
+      // Send 4KB buffer clearing chunk for proxy/CDN pass-through
       res.write(': ' + ' '.repeat(4096) + '\n\n');
 
       const initChunk = {
@@ -167,7 +166,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       };
       res.write(`data: ${JSON.stringify(initChunk)}\n\n`);
 
-      // Keep connection alive while NVIDIA allocates the slot
       heartbeat = setInterval(() => {
         if (!res.writableEnded) {
           res.write(': keep-alive\n\n');
@@ -373,3 +371,4 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
 }
 
 export default app;
+                
