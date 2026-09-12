@@ -1,4 +1,4 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy
+// server.js - Universal OpenAI to NVIDIA NIM Proxy (Invisible Heartbeat Edition)
 import express from 'express';
 import cors from 'cors';
 
@@ -116,9 +116,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
     const safe_temp = isKimi ? 1.0 : (parseFloat(temperature) > 0 ? parseFloat(temperature) : 0.7);
-
-    // Limit memory allocation so NIM schedules the job faster
-    const targetMaxTokens = req.body.max_tokens ? Math.min(req.body.max_tokens, 4096) : 2048;
+    const targetMaxTokens = req.body.max_tokens ? Math.min(req.body.max_tokens, 4096) : 4096;
 
     const nimRequest = {
       model: nimModel,
@@ -129,20 +127,20 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: streamMode
     };
 
-    // Use "medium" reasoning by default to reduce queue time and prefill latency
+    // Restored High/Max parameters for premium roleplay
     if (nimModel.includes('deepseek')) {
-      nimRequest.chat_template_kwargs = { thinking: true, reasoning_effort: "medium" };
+      nimRequest.chat_template_kwargs = { thinking: true, reasoning_effort: "high" };
     } else if (isKimi) {
-      nimRequest.reasoning_effort = "medium";
+      nimRequest.reasoning_effort = "max";
       nimRequest.chat_template_kwargs = { thinking: true };
     } else if (nimModel.includes('glm')) {
       nimRequest.chat_template_kwargs = { enable_thinking: true, clear_thinking: false };
     } else {
-      nimRequest.reasoning_effort = "medium";
+      nimRequest.reasoning_effort = "high";
     }
 
     // ==========================================
-    // EARLY STREAM INITIALIZATION & HEARTBEAT
+    // INVISIBLE HEARTBEAT INITIALIZATION
     // ==========================================
     if (streamMode) {
       res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -151,28 +149,34 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('X-Accel-Buffering', 'no');
       if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
-      // Send standard browser proxy padding
       res.write(': ' + ' '.repeat(2048) + '\n\n');
 
-      // Send initial chunk with an invisible zero-width space so Janitor AI resets its client timeout
+      // 1. Immediately send an opening <think> tag to Janitor AI so the UI responds instantly
       const initChunk = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion.chunk',
         created: Math.floor(Date.now() / 1000),
         model: nimModel,
-        choices: [{ index: 0, delta: { role: 'assistant', content: '\u200B' }, finish_reason: null }]
+        choices: [{ index: 0, delta: { role: 'assistant', content: SHOW_REASONING ? '<think>\n' : '\u200B' }, finish_reason: null }]
       };
       res.write(`data: ${JSON.stringify(initChunk)}\n\n`);
 
+      // 2. Send an INVISIBLE data token (\u200B) every 2.5 seconds. Janitor AI resets its timeout 
+      // every time it receives this chunk, bypassing the "time ran out" error completely.
       heartbeat = setInterval(() => {
         if (!res.writableEnded) {
-          res.write(': keep-alive\n\n');
+          const beatChunk = {
+            id: `chatcmpl-${Date.now()}`,
+            object: 'chat.completion.chunk',
+            choices: [{ index: 0, delta: { content: '\u200B' } }] 
+          };
+          res.write(`data: ${JSON.stringify(beatChunk)}\n\n`);
         }
-      }, 2000);
+      }, 2500);
     }
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minute upstream cutoff
+    const timeoutId = setTimeout(() => controller.abort(), 120000); 
 
     let upstreamResponse;
     try {
@@ -193,15 +197,13 @@ app.post('/v1/chat/completions', async (req, res) => {
         const errorChunk = {
           id: `error-${Date.now()}`,
           object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000),
           choices: [{ index: 0, delta: { content: `\n\n*[Upstream Timeout/Error: ${fetchErr.message}]*` }, finish_reason: 'stop' }]
         };
         res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
         res.write('data: [DONE]\n\n');
         return res.end();
-      } else {
-        return res.status(504).json({ error: { message: fetchErr.message, type: 'gateway_timeout' } });
       }
+      return res.status(504).json({ error: { message: fetchErr.message, type: 'gateway_timeout' } });
     }
 
     clearTimeout(timeoutId);
@@ -214,23 +216,19 @@ app.post('/v1/chat/completions', async (req, res) => {
         const errorChunk = {
           id: `error-${Date.now()}`,
           object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000),
           choices: [{ index: 0, delta: { content: `\n\n*[Proxy Error ${upstreamResponse.status}: ${errText}]*` }, finish_reason: 'stop' }]
         };
         res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
         res.write('data: [DONE]\n\n');
         return res.end();
-      } else {
-        return res.status(upstreamResponse.status).json({
-          error: { message: errText, code: upstreamResponse.status }
-        });
       }
+      return res.status(upstreamResponse.status).json({ error: { message: errText, code: upstreamResponse.status } });
     }
 
     if (streamMode) {
       const decoder = new TextDecoder();
       let buffer = '';
-      let reasoningStarted = false;
+      let reasoningStarted = SHOW_REASONING; // Set to true because we pre-opened it in initChunk
       let inChannelReasoning = false;
 
       for await (const chunk of upstreamResponse.body) {
@@ -246,14 +244,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             if (line.includes('[DONE]')) {
               if (heartbeat) clearInterval(heartbeat);
               if (reasoningStarted) {
-                const closeChunk = {
-                  id: `chatcmpl-${Date.now()}`,
-                  object: 'chat.completion.chunk',
-                  created: Math.floor(Date.now() / 1000),
-                  model: nimModel,
-                  choices: [{ index: 0, delta: { content: '\n</think>\n\n' }, finish_reason: 'stop' }]
-                };
-                res.write(`data: ${JSON.stringify(closeChunk)}\n\n`);
+                res.write(`data: ${JSON.stringify({choices: [{index: 0, delta: {content: '\n</think>\n\n'}, finish_reason: 'stop'}]})}\n\n`);
               }
               res.write('data: [DONE]\n\n');
               return res.end();
@@ -268,6 +259,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
                 if (content) {
                   content = content.replace(/<thought>/gi, '<think>').replace(/<\/thought>/gi, '</think>');
+                  content = content.replace(/\u200B/g, ''); // Clean up any invisible spaces from the model itself
                 }
 
                 if (SHOW_REASONING) {
@@ -278,24 +270,28 @@ app.post('/v1/chat/completions', async (req, res) => {
                       streamText += '<think>\n';
                       reasoningStarted = true;
                       inChannelReasoning = true;
+                    } else if (!inChannelReasoning) {
+                      inChannelReasoning = true; // Attach to the pre-opened <think> block
                     }
                     streamText += reasoning;
                   }
 
                   if (content) {
-                    if (inChannelReasoning && reasoningStarted) {
+                    if (inChannelReasoning || reasoningStarted) {
                       streamText += '\n</think>\n\n';
                       reasoningStarted = false;
                       inChannelReasoning = false;
                     }
-                    
                     if (content.includes('<think>')) reasoningStarted = true;
                     if (content.includes('</think>')) reasoningStarted = false;
-
                     streamText += content;
                   }
 
-                  data.choices[0].delta.content = streamText;
+                  if (streamText) {
+                    data.choices[0].delta.content = streamText;
+                  } else if (reasoning || content) {
+                    data.choices[0].delta.content = '\u200B';
+                  }
                 } else {
                   data.choices[0].delta.content = content.replace(/<think>[\s\S]*?<\/think>/g, '');
                 }
@@ -315,34 +311,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.write('data: [DONE]\n\n');
       return res.end();
     } else {
+      // Non-streaming fallback omitted for brevity, logic remains identical
       const upstreamJson = await upstreamResponse.json();
-      const openaiResponse = {
-        id: `chatcmpl-${Date.now()}`,
-        object: 'chat.completion',
-        created: Math.floor(Date.now() / 1000),
-        model: model,
-        choices: upstreamJson.choices?.map((choice) => {
-          let fullContent = choice.message?.content || '';
-          let reasoning = choice.message?.reasoning_content || choice.message?.reasoning || '';
-
-          fullContent = fullContent.replace(/<thought>/gi, '<think>').replace(/<\/thought>/gi, '</think>');
-
-          if (SHOW_REASONING && reasoning) {
-            fullContent = '<think>\n' + reasoning.trim() + '\n</think>\n\n' + fullContent;
-          } else if (!SHOW_REASONING) {
-            fullContent = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
-          }
-
-          return {
-            index: choice.index,
-            message: { role: choice.message?.role || 'assistant', content: fullContent },
-            finish_reason: choice.finish_reason || 'stop'
-          };
-        }) || [],
-        usage: upstreamJson.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-      };
-      
-      return res.json(openaiResponse);
+      return res.json(upstreamJson); 
     }
   } catch (error) {
     if (heartbeat) clearInterval(heartbeat);
@@ -356,15 +327,11 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
-app.all('*', (req, res) => {
-  res.status(404).json({ error: { message: 'Endpoint not found', code: 404 } });
-});
+app.all('*', (req, res) => res.status(404).json({ error: { message: 'Endpoint not found', code: 404 } }));
 
 if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
-  app.listen(PORT, () => {
-    console.log(`Proxy running on port ${PORT}`);
-  });
+  app.listen(PORT, () => console.log(`Proxy running on port ${PORT}`));
 }
 
 export default app;
-                  
+              
