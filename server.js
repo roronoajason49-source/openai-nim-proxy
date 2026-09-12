@@ -1,4 +1,4 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy (Optimized Streaming Edition)
+// server.js - Universal OpenAI to NVIDIA NIM Proxy (Early Heartbeat Edition)
 import express from 'express';
 import cors from 'cors';
 
@@ -114,7 +114,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       });
     }
 
-    // Direct directive to user turn only (avoiding assistant prefill collisions on NIM)
     if (normalizedMessages.length > 0) {
       const lastMsg = normalizedMessages[normalizedMessages.length - 1];
       if (lastMsg.role === 'user') {
@@ -134,7 +133,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: streamMode
     };
 
-    // Model-specific flags
     if (nimModel.includes('deepseek-v4')) {
       nimRequest.chat_template_kwargs = { thinking: true, reasoning_effort: "high" };
     } else if (isKimi) {
@@ -146,30 +144,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       nimRequest.reasoning_effort = "high";
     }
 
-    // Set 120s timeout signal
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 120000);
-
-    const upstreamResponse = await fetch(`${NIM_API_BASE}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${NIM_API_KEY}`,
-        'Content-Type': 'application/json',
-        'Accept': streamMode ? 'text/event-stream' : 'application/json'
-      },
-      body: JSON.stringify(nimRequest),
-      signal: controller.signal
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!upstreamResponse.ok) {
-      const errText = await upstreamResponse.text();
-      return res.status(upstreamResponse.status).json({
-        error: { message: errText, code: upstreamResponse.status }
-      });
-    }
-
+    // ==========================================
+    // EARLY STREAM INITIALIZATION
+    // ==========================================
     if (streamMode) {
       res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
       res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -177,7 +154,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('X-Accel-Buffering', 'no');
       if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
-      // 4KB padding prevents Vercel/Render reverse proxies from buffering initial output
+      // Immediately send the 4KB padding BEFORE fetching
       res.write(': ' + ' '.repeat(4096) + '\n\n');
 
       const initChunk = {
@@ -189,13 +166,72 @@ app.post('/v1/chat/completions', async (req, res) => {
       };
       res.write(`data: ${JSON.stringify(initChunk)}\n\n`);
 
-      // Heartbeat keeps the connection alive during long reasoning phases
+      // Start pinging Janitor AI immediately while we wait in NVIDIA's queue
       heartbeat = setInterval(() => {
         if (!res.writableEnded) {
           res.write(': keep-alive\n\n');
         }
       }, 2000);
+    }
 
+    // Extended timeout to account for severe queue times
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+
+    let upstreamResponse;
+    try {
+      upstreamResponse = await fetch(`${NIM_API_BASE}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${NIM_API_KEY}`,
+          'Content-Type': 'application/json',
+          'Accept': streamMode ? 'text/event-stream' : 'application/json'
+        },
+        body: JSON.stringify(nimRequest),
+        signal: controller.signal
+      });
+    } catch (fetchErr) {
+      clearTimeout(timeoutId);
+      if (heartbeat) clearInterval(heartbeat);
+      if (streamMode) {
+        const errorChunk = {
+          id: `error-${Date.now()}`,
+          object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000),
+          choices: [{ index: 0, delta: { content: `\n\n*[Upstream Timeout/Error: ${fetchErr.message}]*` }, finish_reason: 'stop' }]
+        };
+        res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
+        res.write('data: [DONE]\n\n');
+        return res.end();
+      } else {
+        return res.status(504).json({ error: { message: fetchErr.message, type: 'gateway_timeout' } });
+      }
+    }
+
+    clearTimeout(timeoutId);
+
+    if (!upstreamResponse.ok) {
+      if (heartbeat) clearInterval(heartbeat);
+      const errText = await upstreamResponse.text();
+      
+      if (streamMode) {
+        const errorChunk = {
+          id: `error-${Date.now()}`,
+          object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000),
+          choices: [{ index: 0, delta: { content: `\n\n*[Proxy Error ${upstreamResponse.status}: NVIDIA NIM rejected request: ${errText}]*` }, finish_reason: 'stop' }]
+        };
+        res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
+        res.write('data: [DONE]\n\n');
+        return res.end();
+      } else {
+        return res.status(upstreamResponse.status).json({
+          error: { message: errText, code: upstreamResponse.status }
+        });
+      }
+    }
+
+    if (streamMode) {
       const decoder = new TextDecoder();
       let buffer = '';
       let reasoningStarted = false;
@@ -316,7 +352,13 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
   } catch (error) {
     if (heartbeat) clearInterval(heartbeat);
-    return res.status(500).json({ error: { message: error.message, type: 'proxy_error' } });
+    if (!res.headersSent) {
+      return res.status(500).json({ error: { message: error.message, type: 'proxy_error' } });
+    } else {
+      res.write(`data: ${JSON.stringify({choices: [{delta: {content: `\n\n*[Internal Error: ${error.message}]*`}, finish_reason: 'stop'}]})}\n\n`);
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    }
   }
 });
 
