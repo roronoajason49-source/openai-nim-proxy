@@ -1,4 +1,4 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy (Optimized Queue Edition)
+// server.js - Universal OpenAI to NVIDIA NIM Proxy (Max Reasoning Effort Edition)
 import express from 'express';
 import cors from 'cors';
 
@@ -29,7 +29,7 @@ const MODEL_MAPPING = {
   'glm-5.2': 'z-ai/glm-5.2',
   'z-ai/glm-5.1': 'z-ai/glm-5.2',
 
-  // DeepSeek V4 Models 
+  // DeepSeek V4 Models
   'deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-ai/deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro-0813',
@@ -53,7 +53,8 @@ app.get('/health', (req, res) => {
     status: 'ok',
     service: 'OpenAI to NVIDIA NIM Proxy',
     default_model: 'deepseek-ai/deepseek-v4-pro-0813',
-    reasoning_display: SHOW_REASONING
+    reasoning_display: SHOW_REASONING,
+    reasoning_effort: 'max'
   });
 });
 
@@ -79,9 +80,11 @@ app.post('/v1/chat/completions', async (req, res) => {
     const { model, messages, temperature } = req.body;
     const nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'deepseek-ai/deepseek-v4-pro-0813';
 
-    // Normalize incoming messages without injecting forced prompts
     const normalizedMessages = [];
     let systemFound = false;
+
+    // Directives to elicit exhaustive chain-of-thought exploration
+    const MAX_THINK_DIRECTIVE = "\n\n[Instruction: Engage in thorough, exhaustive step-by-step analysis. Deeply examine character subtext, motivations, sensory environment, and narrative direction in your thinking process before replying.]";
 
     if (Array.isArray(messages)) {
       for (const msg of messages) {
@@ -91,7 +94,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
         if (role === 'system') {
           if (!systemFound) {
-            normalizedMessages.push({ role: 'system', content: msg.content.trim() });
+            normalizedMessages.push({ role: 'system', content: msg.content.trim() + MAX_THINK_DIRECTIVE });
             systemFound = true;
             continue;
           } else {
@@ -110,18 +113,23 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (!systemFound) {
       normalizedMessages.unshift({
         role: 'system',
-        content: 'You are an expert roleplay assistant.'
+        content: 'You are an expert roleplay assistant.' + MAX_THINK_DIRECTIVE
       });
+    }
+
+    if (normalizedMessages.length > 0) {
+      const lastMsg = normalizedMessages[normalizedMessages.length - 1];
+      if (lastMsg.role === 'user') {
+        lastMsg.content += "\n\n[System Directive: Provide an extensive, deep-thought reasoning trace before generating your response.]";
+      }
     }
 
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
     const safe_temp = isKimi ? 1.0 : (parseFloat(temperature) > 0 ? parseFloat(temperature) : 0.7);
 
-    // Dynamic max_tokens: Respect Janitor AI's setting to avoid NIM scheduler de-prioritization
+    // Ensure adequate token allowance so deep thinking does not consume the entire output quota
     const clientMaxTokens = parseInt(req.body.max_tokens, 10);
-    const resolvedMaxTokens = !isNaN(clientMaxTokens) && clientMaxTokens > 0 
-      ? Math.min(clientMaxTokens, 4096) 
-      : 3000;
+    const resolvedMaxTokens = Math.max(clientMaxTokens || 0, 8192);
 
     const nimRequest = {
       model: nimModel,
@@ -129,19 +137,32 @@ app.post('/v1/chat/completions', async (req, res) => {
       temperature: safe_temp,
       top_p: req.body.top_p ?? 0.95,
       max_tokens: resolvedMaxTokens,
-      stream: streamMode
+      stream: streamMode,
+      reasoning_effort: 'max' // Set root-level reasoning effort to max
     };
 
-    // Keep reasoning effort strictly at "high"
+    // Propagate max reasoning settings across provider-specific templates
     if (nimModel.includes('deepseek-v4')) {
-      nimRequest.chat_template_kwargs = { thinking: true, reasoning_effort: 'high' };
+      nimRequest.chat_template_kwargs = {
+        thinking: true,
+        reasoning_effort: 'max'
+      };
     } else if (isKimi) {
-      nimRequest.reasoning_effort = 'high';
-      nimRequest.chat_template_kwargs = { thinking: true };
+      nimRequest.chat_template_kwargs = {
+        thinking: true,
+        reasoning_effort: 'max'
+      };
     } else if (nimModel.includes('glm')) {
-      nimRequest.chat_template_kwargs = { enable_thinking: true, clear_thinking: false };
+      nimRequest.chat_template_kwargs = {
+        enable_thinking: true,
+        clear_thinking: false,
+        reasoning_effort: 'max'
+      };
     } else {
-      nimRequest.reasoning_effort = 'high';
+      nimRequest.chat_template_kwargs = {
+        thinking: true,
+        reasoning_effort: 'max'
+      };
     }
 
     // ==========================================
@@ -154,7 +175,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('X-Accel-Buffering', 'no');
       if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
-      // Send 4KB buffer clearing chunk for proxy/CDN pass-through
       res.write(': ' + ' '.repeat(4096) + '\n\n');
 
       const initChunk = {
@@ -371,4 +391,4 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
 }
 
 export default app;
-                
+          
