@@ -24,6 +24,8 @@ const SHOW_REASONING = true;
 
 const MODEL_MAPPING = {
   // GLM Models
+  'glm-5.3-flash': 'z-ai/glm-5.3-flash',
+  'z-ai/glm-5.3-flash': 'z-ai/glm-5.3-flash',
   'glm-5.3': 'z-ai/glm-5.3',
   'z-ai/glm-5.3': 'z-ai/glm-5.3',
   'glm-5.2': 'z-ai/glm-5.2',
@@ -156,6 +158,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       nimRequest.chat_template_kwargs = {
         enable_thinking: true,
         clear_thinking: false,
+        thinking: true,
         reasoning_effort: 'max'
       };
     } else {
@@ -391,4 +394,3 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
 }
 
 export default app;
-          
