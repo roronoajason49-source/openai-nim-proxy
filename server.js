@@ -1,4 +1,4 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy (Targeted Reasoning Effort Edition)
+// server.js - Universal OpenAI to NVIDIA NIM Proxy (GLM-5.3 High Effort Edition)
 import express from 'express';
 import cors from 'cors';
 
@@ -39,10 +39,13 @@ const MODEL_MAPPING = {
   'deepseek-ai/deepseek-v4-flash-0731': 'deepseek-ai/deepseek-v4-flash-0731',
 
   // Moonshot Kimi Models
+  'kimi': 'moonshotai/kimi-k2.5',
   'kimi-k3': 'moonshotai/kimi-k3',
   'moonshotai/kimi-k3': 'moonshotai/kimi-k3',
-  'kimi-k2-thinking': 'moonshotai/kimi-k2-thinking',
   'kimi-k2.5': 'moonshotai/kimi-k2.5',
+  'moonshotai/kimi-k2.5': 'moonshotai/kimi-k2.5',
+  'kimi-k2-thinking': 'moonshotai/kimi-k2-thinking',
+  'moonshotai/kimi-k2-thinking': 'moonshotai/kimi-k2-thinking',
 
   // Other NIM Models
   'inkling': 'thinkingmachines/inkling',
@@ -79,18 +82,23 @@ app.post('/v1/chat/completions', async (req, res) => {
 
   try {
     const { model, messages, temperature } = req.body;
-    const nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || 'deepseek-ai/deepseek-v4-pro-0813';
+    const nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || model || 'deepseek-ai/deepseek-v4-pro-0813';
 
-    // Set high for glm-5.3-flash, keep max for all others
-    const isGlmFlash = nimModel.includes('glm-5.3-flash');
-    const selectedReasoningEffort = isGlmFlash ? 'high' : 'max';
+    console.log(`[Incoming Request] Model: "${model}" -> Resolved NIM: "${nimModel}" | Stream: ${streamMode}`);
+
+    // Matches both z-ai/glm-5.3 and z-ai/glm-5.3-flash
+    const isGlm53 = nimModel.includes('glm-5.3');
+    const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
+
+    // High effort for GLM-5.3; Max effort for DeepSeek, Kimi, etc.
+    const selectedEffort = isGlm53 ? 'high' : 'max';
 
     const normalizedMessages = [];
     let systemFound = false;
 
-    const RP_DIRECTIVE = isGlmFlash
+    const RP_DIRECTIVE = isGlm53
       ? "\n\n[Instruction: Reason step-by-step to plan character actions, dialogue, and narrative direction before replying.]"
-      : "\n\n[Instruction: Engage in thorough, exhaustive step-by-step analysis. Deeply examine character subtext, motivations, sensory environment, and narrative direction in your thinking process before replying.]";
+      : "\n\n[Instruction: Engage in thorough, deep reasoning. Deliberate character psychology, motivations, sensory context, and narrative direction in your thinking process before replying.]";
 
     if (Array.isArray(messages)) {
       for (const msg of messages) {
@@ -126,15 +134,13 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (normalizedMessages.length > 0) {
       const lastMsg = normalizedMessages[normalizedMessages.length - 1];
       if (lastMsg.role === 'user') {
-        lastMsg.content += isGlmFlash
+        lastMsg.content += isGlm53
           ? "\n\n[System Directive: Think first before responding.]"
-          : "\n\n[System Directive: Provide an extensive, deep-thought reasoning trace before generating your response.]";
+          : "\n\n[System Directive: Provide a thorough internal thinking trace before outputting the dialogue.]";
       }
     }
 
-    const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
     const safe_temp = isKimi ? 1.0 : (parseFloat(temperature) > 0 ? parseFloat(temperature) : 0.7);
-
     const clientMaxTokens = parseInt(req.body.max_tokens, 10);
     const resolvedMaxTokens = Math.max(clientMaxTokens || 0, 8192);
 
@@ -145,32 +151,13 @@ app.post('/v1/chat/completions', async (req, res) => {
       top_p: req.body.top_p ?? 0.95,
       max_tokens: resolvedMaxTokens,
       stream: streamMode,
-      reasoning_effort: selectedReasoningEffort
+      reasoning_effort: selectedEffort,
+      chat_template_kwargs: {
+        thinking: true,
+        reasoning_effort: selectedEffort,
+        ...(nimModel.includes('glm') ? { enable_thinking: true, clear_thinking: false } : {})
+      }
     };
-
-    if (nimModel.includes('deepseek-v4')) {
-      nimRequest.chat_template_kwargs = {
-        thinking: true,
-        reasoning_effort: selectedReasoningEffort
-      };
-    } else if (isKimi) {
-      nimRequest.chat_template_kwargs = {
-        thinking: true,
-        reasoning_effort: selectedReasoningEffort
-      };
-    } else if (nimModel.includes('glm')) {
-      nimRequest.chat_template_kwargs = {
-        enable_thinking: true,
-        clear_thinking: false,
-        thinking: true,
-        reasoning_effort: selectedReasoningEffort
-      };
-    } else {
-      nimRequest.chat_template_kwargs = {
-        thinking: true,
-        reasoning_effort: selectedReasoningEffort
-      };
-    }
 
     // ==========================================
     // STREAM INITIALIZATION & KEEP-ALIVE
@@ -218,12 +205,14 @@ app.post('/v1/chat/completions', async (req, res) => {
     } catch (fetchErr) {
       clearTimeout(timeoutId);
       if (heartbeat) clearInterval(heartbeat);
+      console.error('[NIM Fetch Failed]:', fetchErr.message);
+
       if (streamMode) {
         const errorChunk = {
           id: `error-${Date.now()}`,
           object: 'chat.completion.chunk',
           created: Math.floor(Date.now() / 1000),
-          choices: [{ index: 0, delta: { content: `\n\n*[Upstream Timeout/Error: ${fetchErr.message}]*` }, finish_reason: 'stop' }]
+          choices: [{ index: 0, delta: { content: `\n\n*[Upstream Fetch Error: ${fetchErr.message}]*` }, finish_reason: 'stop' }]
         };
         res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
         res.write('data: [DONE]\n\n');
@@ -238,13 +227,14 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (!upstreamResponse.ok) {
       if (heartbeat) clearInterval(heartbeat);
       const errText = await upstreamResponse.text();
-      
+      console.error(`[NIM Error ${upstreamResponse.status} for ${nimModel}]: ${errText}`);
+
       if (streamMode) {
         const errorChunk = {
           id: `error-${Date.now()}`,
           object: 'chat.completion.chunk',
           created: Math.floor(Date.now() / 1000),
-          choices: [{ index: 0, delta: { content: `\n\n*[Proxy Error ${upstreamResponse.status}: NVIDIA NIM rejected request: ${errText}]*` }, finish_reason: 'stop' }]
+          choices: [{ index: 0, delta: { content: `\n\n*[NVIDIA NIM Error ${upstreamResponse.status}: ${errText}]*` }, finish_reason: 'stop' }]
         };
         res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
         res.write('data: [DONE]\n\n');
@@ -317,7 +307,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                       reasoningStarted = false;
                       inChannelReasoning = false;
                     }
-                    
+
                     if (content.includes('<think>')) reasoningStarted = true;
                     if (content.includes('</think>')) reasoningStarted = false;
 
@@ -372,15 +362,16 @@ app.post('/v1/chat/completions', async (req, res) => {
         }) || [],
         usage: upstreamJson.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
       };
-      
+
       return res.json(openaiResponse);
     }
   } catch (error) {
     if (heartbeat) clearInterval(heartbeat);
+    console.error('[Internal Proxy Exception]:', error);
     if (!res.headersSent) {
       return res.status(500).json({ error: { message: error.message, type: 'proxy_error' } });
     } else {
-      res.write(`data: ${JSON.stringify({choices: [{delta: {content: `\n\n*[Internal Error: ${error.message}]*`}, finish_reason: 'stop'}]})}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: `\n\n*[Internal Error: ${error.message}]*` }, finish_reason: 'stop' }] })}\n\n`);
       res.write('data: [DONE]\n\n');
       return res.end();
     }
