@@ -1,4 +1,4 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy (GLM-5.3 High Effort Edition)
+// server.js - Universal OpenAI to NVIDIA NIM Proxy (Clean Prompt Edition)
 import express from 'express';
 import cors from 'cors';
 
@@ -86,7 +86,6 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     console.log(`[Incoming Request] Model: "${model}" -> Resolved NIM: "${nimModel}" | Stream: ${streamMode}`);
 
-    // Matches both z-ai/glm-5.3 and z-ai/glm-5.3-flash
     const isGlm53 = nimModel.includes('glm-5.3');
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
 
@@ -96,10 +95,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     const normalizedMessages = [];
     let systemFound = false;
 
-    const RP_DIRECTIVE = isGlm53
-      ? "\n\n[Instruction: Reason step-by-step to plan character actions, dialogue, and narrative direction before replying.]"
-      : "\n\n[Instruction: Engage in thorough, deep reasoning. Deliberate character psychology, motivations, sensory context, and narrative direction in your thinking process before replying.]";
-
+    // Normalize messages without appending reasoning prompt injections
     if (Array.isArray(messages)) {
       for (const msg of messages) {
         if (!msg.content || typeof msg.content !== 'string' || msg.content.trim() === '') continue;
@@ -108,7 +104,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
         if (role === 'system') {
           if (!systemFound) {
-            normalizedMessages.push({ role: 'system', content: msg.content.trim() + RP_DIRECTIVE });
+            normalizedMessages.push({ role: 'system', content: msg.content.trim() });
             systemFound = true;
             continue;
           } else {
@@ -127,17 +123,8 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (!systemFound) {
       normalizedMessages.unshift({
         role: 'system',
-        content: 'You are an expert roleplay assistant.' + RP_DIRECTIVE
+        content: 'You are an expert roleplay assistant.'
       });
-    }
-
-    if (normalizedMessages.length > 0) {
-      const lastMsg = normalizedMessages[normalizedMessages.length - 1];
-      if (lastMsg.role === 'user') {
-        lastMsg.content += isGlm53
-          ? "\n\n[System Directive: Think first before responding.]"
-          : "\n\n[System Directive: Provide a thorough internal thinking trace before outputting the dialogue.]";
-      }
     }
 
     const safe_temp = isKimi ? 1.0 : (parseFloat(temperature) > 0 ? parseFloat(temperature) : 0.7);
@@ -389,3 +376,4 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
 }
 
 export default app;
+  
