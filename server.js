@@ -1,4 +1,4 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy (Render & Vercel Universal Edition)
+// server.js - Universal OpenAI to NVIDIA NIM Proxy (GLM-5.3 Max Effort Edition)
 import express from 'express';
 import cors from 'cors';
 
@@ -53,19 +53,16 @@ const MODEL_MAPPING = {
   'qwen-122b': 'qwen/qwen3.5-122b-a10b'
 };
 
-// Health check endpoint
-app.get(['/', '/health'], (req, res) => {
+app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     service: 'OpenAI to NVIDIA NIM Proxy',
-    has_api_key: Boolean(NIM_API_KEY && NIM_API_KEY.length > 10),
     default_model: 'deepseek-ai/deepseek-v4-pro-0813',
     reasoning_display: SHOW_REASONING
   });
 });
 
-// Model discovery: supports both /v1/models and /models
-const handleModels = (req, res) => {
+app.get('/v1/models', (req, res) => {
   const models = Object.keys(MODEL_MAPPING).map((model) => ({
     id: model,
     object: 'model',
@@ -73,12 +70,9 @@ const handleModels = (req, res) => {
     owned_by: 'nvidia-nim-proxy'
   }));
   res.json({ object: 'list', data: models });
-};
-app.get('/v1/models', handleModels);
-app.get('/models', handleModels);
+});
 
-// Main chat handler: supports both /v1/chat/completions and /chat/completions
-const handleChatCompletion = async (req, res) => {
+app.post('/v1/chat/completions', async (req, res) => {
   const streamMode = req.body?.stream ?? false;
   let heartbeat = null;
 
@@ -90,8 +84,9 @@ const handleChatCompletion = async (req, res) => {
     const { model, messages, temperature } = req.body;
     const nimModel = MODEL_MAPPING[model] || MODEL_MAPPING[model?.toLowerCase()] || model || 'deepseek-ai/deepseek-v4-pro-0813';
 
-    console.log(`[Request] Model: "${model}" -> Resolved: "${nimModel}" | Stream: ${streamMode}`);
+    console.log(`[Incoming Request] Model: "${model}" -> Resolved NIM: "${nimModel}" | Stream: ${streamMode}`);
 
+    // High effort for GLM-5.3-flash; Max effort for regular GLM-5.3, DeepSeek, Kimi, etc.
     const isGlmFlash = nimModel.includes('glm-5.3-flash');
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
     const selectedEffort = isGlmFlash ? 'high' : 'max';
@@ -366,21 +361,17 @@ const handleChatCompletion = async (req, res) => {
       return res.end();
     }
   }
-};
-
-app.post('/v1/chat/completions', handleChatCompletion);
-app.post('/chat/completions', handleChatCompletion);
-
-app.all('*', (req, res) => {
-  res.status(404).json({ error: { message: `Endpoint not found: ${req.method} ${req.originalUrl}`, code: 404 } });
 });
 
-// Explicitly bind to '0.0.0.0' for Render
-if (!process.env.VERCEL) {
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Proxy listening on http://0.0.0.0:${PORT}`);
+app.all('*', (req, res) => {
+  res.status(404).json({ error: { message: 'Endpoint not found', code: 404 } });
+});
+
+if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`Proxy running on port ${PORT}`);
   });
 }
 
 export default app;
-  
+                
