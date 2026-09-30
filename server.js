@@ -1,4 +1,4 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy (GLM-5.3 Max Effort Edition)
+// server.js - Universal OpenAI to NVIDIA NIM Proxy (GLM-5.3 High Effort Edition)
 import express from 'express';
 import cors from 'cors';
 
@@ -86,10 +86,10 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     console.log(`[Incoming Request] Model: "${model}" -> Resolved NIM: "${nimModel}" | Stream: ${streamMode}`);
 
-    // High effort for GLM-5.3-flash; Max effort for regular GLM-5.3, DeepSeek, Kimi, etc.
-    const isGlmFlash = nimModel.includes('glm-5.3-flash');
+    // High effort for GLM-5.3 (both regular and flash); Max effort for DeepSeek, Kimi, etc.
+    const isGlm53 = nimModel.includes('glm-5.3');
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
-    const selectedEffort = isGlmFlash ? 'high' : 'max';
+    const selectedEffort = isGlm53 ? 'high' : 'max';
 
     const normalizedMessages = [];
     let systemFound = false;
@@ -374,4 +374,4 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
 }
 
 export default app;
-                
+                    
