@@ -1,4 +1,4 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy (GLM-5.3 High Effort Edition)
+// server.js - Universal OpenAI to NVIDIA NIM Proxy (GLM-5.3 Max Effort Edition)
 import express from 'express';
 import cors from 'cors';
 
@@ -34,7 +34,7 @@ const MODEL_MAPPING = {
   // DeepSeek V4 Models
   'deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-ai/deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
-  'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro-0813',
+  'deepseek-ai/deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-v4-flash-0731': 'deepseek-ai/deepseek-v4-flash-0731',
   'deepseek-ai/deepseek-v4-flash-0731': 'deepseek-ai/deepseek-v4-flash-0731',
 
@@ -86,10 +86,10 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     console.log(`[Incoming Request] Model: "${model}" -> Resolved NIM: "${nimModel}" | Stream: ${streamMode}`);
 
-    // High effort for GLM-5.3 (both regular and flash); Max effort for DeepSeek, Kimi, etc.
-    const isGlm53 = nimModel.includes('glm-5.3');
+    // High effort for GLM-5.3-flash; Max effort restored for standard GLM-5.3, DeepSeek, Kimi, etc.
+    const isGlmFlash = nimModel.includes('glm-5.3-flash');
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
-    const selectedEffort = isGlm53 ? 'high' : 'max';
+    const selectedEffort = isGlmFlash ? 'high' : 'max';
 
     const normalizedMessages = [];
     let systemFound = false;
@@ -374,4 +374,4 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
 }
 
 export default app;
-                    
+
