@@ -88,10 +88,10 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     console.log(`[Incoming Request] Model: "${model}" -> Resolved NIM: "${nimModel}" | Stream: ${streamMode}`);
 
-    // Set 'high' effort for DeepSeek V4.1 Flash, 'max' for all other reasoning models
+    // Set 'none' effort for DeepSeek V4.1 Flash, 'max' for other reasoning models
     const isV41Flash = nimModel.includes('deepseek-v4.1-flash');
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
-    const selectedEffort = isV41Flash ? 'high' : 'max';
+    const selectedEffort = isV41Flash ? 'none' : 'max';
 
     const normalizedMessages = [];
     let systemFound = false;
@@ -140,7 +140,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: streamMode,
       reasoning_effort: selectedEffort,
       chat_template_kwargs: {
-        thinking: true,
+        thinking: selectedEffort !== 'none',
         reasoning_effort: selectedEffort,
         ...(nimModel.includes('glm') ? { enable_thinking: true, clear_thinking: false } : {})
       }
