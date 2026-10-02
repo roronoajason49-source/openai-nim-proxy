@@ -86,10 +86,9 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     console.log(`[Incoming Request] Model: "${model}" -> Resolved NIM: "${nimModel}" | Stream: ${streamMode}`);
 
-    // High effort for GLM-5.3-flash; Max effort for regular GLM-5.3, DeepSeek, Kimi, etc.
-    const isGlmFlash = nimModel.includes('glm-5.3-flash');
+    // Set maximum thinking effort across reasoning models, including GLM-5.3-flash
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
-    const selectedEffort = isGlmFlash ? 'high' : 'max';
+    const selectedEffort = 'max';
 
     const normalizedMessages = [];
     let systemFound = false;
@@ -374,3 +373,4 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
 }
 
 export default app;
+                
