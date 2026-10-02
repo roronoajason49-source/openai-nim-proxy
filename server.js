@@ -31,7 +31,9 @@ const MODEL_MAPPING = {
   'glm-5.2': 'z-ai/glm-5.2',
   'z-ai/glm-5.1': 'z-ai/glm-5.2',
 
-  // DeepSeek V4 Models
+  // DeepSeek Models
+  'deepseek-v4.1-flash': 'deepseek-ai/deepseek-v4.1-flash',
+  'deepseek-ai/deepseek-v4.1-flash': 'deepseek-ai/deepseek-v4.1-flash',
   'deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-ai/deepseek-v4-pro-0813': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro-0813',
@@ -86,9 +88,10 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     console.log(`[Incoming Request] Model: "${model}" -> Resolved NIM: "${nimModel}" | Stream: ${streamMode}`);
 
-    // Set maximum thinking effort across reasoning models, including GLM-5.3-flash
+    // Set 'high' effort for DeepSeek V4.1 Flash, 'max' for all other reasoning models
+    const isV41Flash = nimModel.includes('deepseek-v4.1-flash');
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
-    const selectedEffort = 'max';
+    const selectedEffort = isV41Flash ? 'high' : 'max';
 
     const normalizedMessages = [];
     let systemFound = false;
@@ -373,4 +376,3 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
 }
 
 export default app;
-                
