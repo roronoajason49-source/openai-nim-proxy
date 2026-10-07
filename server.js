@@ -1,4 +1,4 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy
+// server.js - Universal OpenAI to NVIDIA NIM Proxy (GLM-5.3 Max Effort Edition)
 import express from 'express';
 import cors from 'cors';
 
@@ -88,10 +88,10 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     console.log(`[Incoming Request] Model: "${model}" -> Resolved NIM: "${nimModel}" | Stream: ${streamMode}`);
 
-    // High effort for GLM-5.3 models and DeepSeek V4.1 Flash; Max effort for DeepSeek V4 Pro, Kimi, etc.
-    const isHighEffort = nimModel.includes('glm-5.3') || nimModel.includes('deepseek-v4.1-flash');
+    // Set 'none' effort for DeepSeek V4.1 Flash, 'max' for other reasoning models
+    const isV41Flash = nimModel.includes('deepseek-v4.1-flash');
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
-    const selectedEffort = isHighEffort ? 'high' : 'max';
+    const selectedEffort = isV41Flash ? 'none' : 'max';
 
     const normalizedMessages = [];
     let systemFound = false;
@@ -140,7 +140,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: streamMode,
       reasoning_effort: selectedEffort,
       chat_template_kwargs: {
-        thinking: true,
+        thinking: selectedEffort !== 'none',
         reasoning_effort: selectedEffort,
         ...(nimModel.includes('glm') ? { enable_thinking: true, clear_thinking: false } : {})
       }
