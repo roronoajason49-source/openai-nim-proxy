@@ -1,4 +1,4 @@
-// server.js - Universal OpenAI to NVIDIA NIM Proxy (GLM-5.3 Max Effort Edition)
+// server.js - Universal OpenAI to NVIDIA NIM Proxy
 import express from 'express';
 import cors from 'cors';
 
@@ -31,6 +31,25 @@ const MODEL_MAPPING = {
   'glm-5.2': 'z-ai/glm-5.2',
   'z-ai/glm-5.1': 'z-ai/glm-5.2',
 
+  // Moonshot Kimi Models
+  'kimi': 'moonshotai/kimi-k2.5',
+  'kimi-k3': 'moonshotai/kimi-k3',
+  'moonshotai/kimi-k3': 'moonshotai/kimi-k3',
+  'kimi-k2.6': 'moonshotai/kimi-k2.6',
+  'moonshotai/kimi-k2.6': 'moonshotai/kimi-k2.6',
+  'kimi-k2.5': 'moonshotai/kimi-k2.5',
+  'moonshotai/kimi-k2.5': 'moonshotai/kimi-k2.5',
+  'kimi-k2-thinking': 'moonshotai/kimi-k2-thinking',
+  'moonshotai/kimi-k2-thinking': 'moonshotai/kimi-k2-thinking',
+
+  // MiniMax Models
+  'minimax-m3.1': 'minimaxai/minimax-m3.1',
+  'minimaxai/minimax-m3.1': 'minimaxai/minimax-m3.1',
+  'm3.1': 'minimaxai/minimax-m3.1',
+  'minimax-m3.1-flash': 'minimaxai/minimax-m3.1-flash',
+  'minimaxai/minimax-m3.1-flash': 'minimaxai/minimax-m3.1-flash',
+  'm3.1-flash': 'minimaxai/minimax-m3.1-flash',
+
   // DeepSeek Models
   'deepseek-v4.1-flash': 'deepseek-ai/deepseek-v4.1-flash',
   'deepseek-ai/deepseek-v4.1-flash': 'deepseek-ai/deepseek-v4.1-flash',
@@ -39,15 +58,6 @@ const MODEL_MAPPING = {
   'deepseek-v4-pro': 'deepseek-ai/deepseek-v4-pro-0813',
   'deepseek-v4-flash-0731': 'deepseek-ai/deepseek-v4-flash-0731',
   'deepseek-ai/deepseek-v4-flash-0731': 'deepseek-ai/deepseek-v4-flash-0731',
-
-  // Moonshot Kimi Models
-  'kimi': 'moonshotai/kimi-k2.5',
-  'kimi-k3': 'moonshotai/kimi-k3',
-  'moonshotai/kimi-k3': 'moonshotai/kimi-k3',
-  'kimi-k2.5': 'moonshotai/kimi-k2.5',
-  'moonshotai/kimi-k2.5': 'moonshotai/kimi-k2.5',
-  'kimi-k2-thinking': 'moonshotai/kimi-k2-thinking',
-  'moonshotai/kimi-k2-thinking': 'moonshotai/kimi-k2-thinking',
 
   // Other NIM Models
   'inkling': 'thinkingmachines/inkling',
@@ -88,10 +98,12 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     console.log(`[Incoming Request] Model: "${model}" -> Resolved NIM: "${nimModel}" | Stream: ${streamMode}`);
 
-    // High effort for DeepSeek V4.1 Flash; Max effort for GLM-5.3-flash, regular GLM-5.3, DeepSeek V4 Pro, etc.
-    const isDeepSeekV41Flash = nimModel.includes('deepseek-v4.1-flash');
+    // Reasoning effort configuration:
+    // 'high' for DeepSeek V4.1 Flash; 'max' for GLM 5.3, Kimi K2.6, MiniMax M3.1 / M3.1 Flash, and others.
+    const isDeepSeekFlash = nimModel.includes('deepseek-v4.1-flash');
+    const selectedEffort = isDeepSeekFlash ? 'high' : 'max';
+
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
-    const selectedEffort = isDeepSeekV41Flash ? 'high' : 'max';
 
     const normalizedMessages = [];
     let systemFound = false;
