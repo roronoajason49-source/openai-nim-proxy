@@ -99,9 +99,9 @@ app.post('/v1/chat/completions', async (req, res) => {
     console.log(`[Incoming Request] Model: "${model}" -> Resolved NIM: "${nimModel}" | Stream: ${streamMode}`);
 
     // Reasoning effort configuration:
-    // 'high' for DeepSeek V4.1 Flash; 'max' for GLM 5.3, Kimi K2.6, MiniMax M3.1 / M3.1 Flash, and others.
-    const isDeepSeekFlash = nimModel.includes('deepseek-v4.1-flash');
-    const selectedEffort = isDeepSeekFlash ? 'high' : 'max';
+    // 'high' for GLM-5.3 models and DeepSeek V4.1 Flash; 'max' for MiniMax, Kimi, DeepSeek Pro, etc.
+    const isHighEffort = nimModel.includes('glm-5.3') || nimModel.includes('deepseek-v4.1-flash');
+    const selectedEffort = isHighEffort ? 'high' : 'max';
 
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
 
