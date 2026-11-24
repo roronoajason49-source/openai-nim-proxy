@@ -101,14 +101,10 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     console.log(`[Incoming Request] Model: "${model}" -> Resolved NIM: "${nimModel}" | Stream: ${streamMode}`);
 
-    // Reasoning effort configuration:
-    // 'high' -> Base GLM-5.3 and DeepSeek V4.1 Flash
-    // 'max'  -> Kimi K3.1 Pro, GLM-5.3 Flash, Kimi K2.6, MiniMax M3.1 / M3.1 Flash, DeepSeek Pro
     const isGlm53Base = nimModel.includes('glm-5.3') && !nimModel.includes('flash');
     const isDeepSeekFlash = nimModel.includes('deepseek-v4.1-flash');
-    const selectedEffort = (isGlm53Base || isDeepSeekFlash) ? 'high' : 'max';
-
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
+    const selectedEffort = (isGlm53Base || isDeepSeekFlash) ? 'high' : 'max';
 
     const normalizedMessages = [];
     let systemFound = false;
@@ -129,10 +125,16 @@ app.post('/v1/chat/completions', async (req, res) => {
           }
         }
 
+        // Preserve reasoning_content if incoming from SillyTavern multi-turn
+        const msgObj = { role, content: msg.content };
+        if (msg.reasoning_content) {
+          msgObj.reasoning_content = msg.reasoning_content;
+        }
+
         if (normalizedMessages.length > 0 && normalizedMessages[normalizedMessages.length - 1].role === role) {
           normalizedMessages[normalizedMessages.length - 1].content += '\n\n' + msg.content;
         } else {
-          normalizedMessages.push({ role, content: msg.content });
+          normalizedMessages.push(msgObj);
         }
       }
     }
@@ -140,27 +142,48 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (!systemFound) {
       normalizedMessages.unshift({
         role: 'system',
-        content: 'You are an expert roleplay assistant.'
+        content: isKimi
+          ? 'You are Kimi, an AI assistant created by Moonshot AI.'
+          : 'You are an expert roleplay assistant.'
       });
     }
 
+    // Kimi requires temperature fixed at 1.0 and top_p at 0.95
     const safe_temp = isKimi ? 1.0 : (parseFloat(temperature) > 0 ? parseFloat(temperature) : 0.7);
+    const safe_top_p = isKimi ? 0.95 : (req.body.top_p ?? 0.95);
     const clientMaxTokens = parseInt(req.body.max_tokens, 10);
-    const resolvedMaxTokens = Math.max(clientMaxTokens || 0, 8192);
+    const resolvedMaxTokens = Math.max(clientMaxTokens || 0, 16384);
+
+    // Build specific chat_template_kwargs based on model family
+    let customTemplateKwargs = {};
+    if (nimModel.includes('glm')) {
+      customTemplateKwargs = {
+        enable_thinking: true,
+        clear_thinking: false,
+        reasoning_effort: selectedEffort
+      };
+    } else if (isKimi) {
+      customTemplateKwargs = {
+        thinking: true,
+        enable_thinking: true,
+        thinking_effort: selectedEffort // Kimi Jinja requires thinking_effort
+      };
+    } else {
+      customTemplateKwargs = {
+        thinking: true,
+        reasoning_effort: selectedEffort
+      };
+    }
 
     const nimRequest = {
       model: nimModel,
       messages: normalizedMessages,
       temperature: safe_temp,
-      top_p: req.body.top_p ?? 0.95,
+      top_p: safe_top_p,
       max_tokens: resolvedMaxTokens,
       stream: streamMode,
       reasoning_effort: selectedEffort,
-      chat_template_kwargs: {
-        thinking: true,
-        reasoning_effort: selectedEffort,
-        ...(nimModel.includes('glm') ? { enable_thinking: true, clear_thinking: false } : {})
-      }
+      chat_template_kwargs: customTemplateKwargs
     };
 
     // ==========================================
@@ -192,7 +215,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 300000);
+    const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 min for long CoT
 
     let upstreamResponse;
     try {
@@ -393,3 +416,4 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
 }
 
 export default app;
+          
