@@ -33,6 +33,9 @@ const MODEL_MAPPING = {
 
   // Moonshot Kimi Models
   'kimi': 'moonshotai/kimi-k2.5',
+  'kimi-k3.1-pro': 'moonshotai/kimi-k3.1-pro',
+  'moonshotai/kimi-k3.1-pro': 'moonshotai/kimi-k3.1-pro',
+  'kimi-k3.1': 'moonshotai/kimi-k3.1-pro',
   'kimi-k3': 'moonshotai/kimi-k3',
   'moonshotai/kimi-k3': 'moonshotai/kimi-k3',
   'kimi-k2.6': 'moonshotai/kimi-k2.6',
@@ -99,9 +102,11 @@ app.post('/v1/chat/completions', async (req, res) => {
     console.log(`[Incoming Request] Model: "${model}" -> Resolved NIM: "${nimModel}" | Stream: ${streamMode}`);
 
     // Reasoning effort configuration:
-    // 'high' for DeepSeek V4.1 Flash; 'max' for GLM 5.3, Kimi K2.6, MiniMax M3.1 / M3.1 Flash, and others.
+    // 'high' -> Base GLM-5.3 and DeepSeek V4.1 Flash
+    // 'max'  -> Kimi K3.1 Pro, GLM-5.3 Flash, Kimi K2.6, MiniMax M3.1 / M3.1 Flash, DeepSeek Pro
+    const isGlm53Base = nimModel.includes('glm-5.3') && !nimModel.includes('flash');
     const isDeepSeekFlash = nimModel.includes('deepseek-v4.1-flash');
-    const selectedEffort = isDeepSeekFlash ? 'high' : 'max';
+    const selectedEffort = (isGlm53Base || isDeepSeekFlash) ? 'high' : 'max';
 
     const isKimi = nimModel.includes('kimi') || nimModel.includes('moonshot');
 
@@ -388,4 +393,3 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
 }
 
 export default app;
-                
